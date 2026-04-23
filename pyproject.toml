@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "parallel-mcmc"
-version = "0.1"
+version = "0.1.0"
 description = "Algorithms for Parallel Evaluation of MCMC Samplers"
 requires-python = ">=3.11"
 readme = "README.md"
@@ -15,7 +15,8 @@ dependencies = [
     "inference_gym",
     "tensorflow_datasets",
     "matplotlib",
-    "jaxtyping"
+    "jaxtyping",
+    "tqdm",
 ]
 authors = [
     {name="David Zoltowski"}, 

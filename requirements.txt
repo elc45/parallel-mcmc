@@ -1,0 +1,15 @@
+# Pinned stack: TensorFlow 2.16 + JAX 0.4.x + TFP (JAX) + NumPy 1.26.
+# Newer JAX needs ml-dtypes>=0.4, which conflicts with TF 2.16; SciPy>=1.14
+# breaks JAX 0.4.23's scipy.linalg expectations.
+numpy==1.26.4
+scipy==1.11.4
+ml-dtypes==0.3.2
+jax==0.4.23
+jaxlib==0.4.23
+tensorflow==2.16.2
+tensorflow-probability==0.24.0
+tensorflow-datasets==4.9.9
+inference_gym==0.0.5
+matplotlib
+jaxtyping
+tqdm
