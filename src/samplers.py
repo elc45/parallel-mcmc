@@ -137,7 +137,8 @@ class ParallelMALA:
 class ParallelHMC:
     # our constructor
     def __init__(self, log_prob, dim, chain_length, max_iter, alg="quasi",
-                 clip_val=1.0, damp_factor=1.0, full_trace=False, basis_transformation=False):
+                 clip_val=1.0, damp_factor=1.0, full_trace=False, basis_transformation=False,
+                 show_progress=False):
         '''
         Args:
             logp - unnormalized log-posterior function that ONLY takes in theta as argument. Use partial.
@@ -159,6 +160,7 @@ class ParallelHMC:
         self.damp_factor = damp_factor
         self.full_trace = full_trace 
         self.basis_transformation = basis_transformation
+        self.show_progress = show_progress
 
     def scan_leapfrog(self, state, step_size):
         # Assumes you start and end 
@@ -221,7 +223,8 @@ class ParallelHMC:
             self.hmc_fxn_for_deer, initial_state, drivers, params, 
             yinit_guess=yinit_guess, max_iter=self.max_iter, 
             quasi=False, qmem_efficient=False, clip_val=self.clip_val,
-            full_trace=self.full_trace, damp_factor=self.damp_factor
+            full_trace=self.full_trace, damp_factor=self.damp_factor,
+            show_progress=self.show_progress,
         )
 
         # if self.basis_transformation:
