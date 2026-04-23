@@ -209,7 +209,7 @@ def deer_iteration(
     tol: Optional[float] = None,
     rtol: Optional[float] = None,
 ) -> jnp.ndarray:
-    f"""
+    """
     Perform the iteration from the DEER framework.
 
     Arguments
