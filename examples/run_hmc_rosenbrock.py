@@ -36,15 +36,17 @@ chain_length = 2500
 key = jr.PRNGKey(1313)
 key, skey = jr.split(key)
 initial_state = 0. + 10. * jr.normal(skey, (D,))
-max_iter = 200 # max number of parallel iters
+max_iter = 2510 # max number of parallel iters
 damp_factor = 0.55
+tol = 1e-8
+rtol = 1e-8
 
 params = {}
 params["epsilon"] = 0.5
 params["num_leapfrog_steps"] = 8
 
 sampler = samplers.ParallelHMC(target_log_prob, D, chain_length, max_iter,
-    full_trace=False, damp_factor=damp_factor, show_progress=_SHOW_DEER_PROGRESS)
+    full_trace=False, damp_factor=damp_factor, show_progress=_SHOW_DEER_PROGRESS, tol=tol, rtol=rtol)
 
 run_sequential = jax.jit(sampler.run_sequential_hmc)
 run_parallel = jax.jit(sampler.run_parallel_hmc)

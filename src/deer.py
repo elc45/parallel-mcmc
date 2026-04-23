@@ -62,6 +62,8 @@ def seq1d(
     preconditioner: Any=None, # Diagonal preconditioner,
     clip_val: float=1e8,
     show_progress: bool = False,
+    tol: Optional[float] = None,
+    rtol: Optional[float] = None,
 ):
     """
     Solve the discrete sequential equation, y[i + 1] = func(y[i], x[i], params) with the DEER framework.
@@ -95,6 +97,10 @@ def seq1d(
         if False, return only the final iterate (uses a jax.lax.while_loop)
     show_progress: bool
         If True and ``full_trace`` is False, report Newton iteration progress on stderr (tqdm) during execution.
+    tol: float or None
+        Absolute tolerance for Newton early stopping (``err > tol``). If None, uses dtype defaults in the solver.
+    rtol: float or None
+        Relative scale for the error term. If None, uses dtype defaults in the solver.
 
     Returns
     -------
@@ -143,6 +149,8 @@ def seq1d(
             preconditioner=preconditioner, 
             clip_val=clip_val,
             show_progress=show_progress,
+            tol=tol,
+            rtol=rtol,
         )
     else:
         yt, samp_iters = deer_iteration(
@@ -166,6 +174,8 @@ def seq1d(
             preconditioner=preconditioner, 
             clip_val=clip_val,
             show_progress=show_progress,
+            tol=tol,
+            rtol=rtol,
         )
     if full_trace:
         return (jnp.vstack((yinit_guess[None, ...], yt)), samp_iters)
@@ -196,6 +206,8 @@ def deer_iteration(
     preconditioner: Any=None, # Diagonal preconditioner
     clip_val: float=1e8,
     show_progress: bool = False,
+    tol: Optional[float] = None,
+    rtol: Optional[float] = None,
 ) -> jnp.ndarray:
     """
     Perform the iteration from the DEER framework.
@@ -239,6 +251,10 @@ def deer_iteration(
     full_trace: bool (XG addition)
         If True, then return all the intermediate y values (up to length max_iter)
         If False, then return only the final y value (which may be decided by early stopping up to the tolerance)
+    tol: float or None
+        Absolute Newton tolerance; None selects dtype-specific defaults in the helper.
+    rtol: float or None
+        Relative scale in the Newton residual; None selects dtype-specific defaults.
 
     Returns
     -------
@@ -266,6 +282,8 @@ def deer_iteration(
             preconditioner=preconditioner, 
             clip_val=clip_val,
             show_progress=show_progress,
+            tol=tol,
+            rtol=rtol,
         )
         return (yt, samp_iters)
     else:
@@ -287,6 +305,8 @@ def deer_iteration(
             preconditioner=preconditioner, 
             clip_val=clip_val,
             show_progress=show_progress,
+            tol=tol,
+            rtol=rtol,
         )
         return (yt, samp_iters)
 
@@ -309,6 +329,8 @@ def deer_iteration_helper(
     preconditioner: Any=None, # Diagonal preconditioner for Quasi
     clip_val: float=1e8,
     show_progress: bool = False,
+    tol: Optional[float] = None,
+    rtol: Optional[float] = None,
 ) -> Tuple[jnp.ndarray, Optional[List[jnp.ndarray]], Callable]:
     """
     Notes:
@@ -327,8 +349,10 @@ def deer_iteration_helper(
 
     dtype = yinit_guess.dtype
     # set the tolerance to be 1e-4 if dtype is float32, else 1e-7 for float64
-    tol = 1e-7 if dtype == jnp.float64 else 1e-4
-    rtol = 1e-4 if dtype == jnp.float64 else 1e-3
+    default_tol = 1e-7 if dtype == jnp.float64 else 1e-4
+    default_rtol = 1e-4 if dtype == jnp.float64 else 1e-3
+    tol_effective = default_tol if tol is None else tol
+    rtol_effective = default_rtol if rtol is None else rtol
 
     # use the iter function if doing early stopping
     def iter_func(
@@ -353,7 +377,7 @@ def deer_iteration_helper(
             yt_next = jnp.clip(yt_next, a_min=-clip, a_max=clip)
             yt_next = jnp.where(jnp.isnan(yt_next), 0.0, yt_next)
 
-        err = jnp.max( jnp.abs(yt_next - yt) - rtol * jnp.abs(yt) )
+        err = jnp.max( jnp.abs(yt_next - yt) - rtol_effective * jnp.abs(yt) )
 
         next_iiter = iiter + 1
         if progress_cb is not None:
@@ -377,7 +401,7 @@ def deer_iteration_helper(
         yt_next = inv_lin(gts, rhs, inv_lin_params)  # (nsamples, ny)
 
         # err = jnp.max(jnp.abs(yt_next - yt))  # checking convergence
-        err = jnp.max( jnp.abs(yt_next - yt) - rtol * jnp.abs(yt) )
+        err = jnp.max( jnp.abs(yt_next - yt) - rtol_effective * jnp.abs(yt) )
 
         yt_next = jnp.nan_to_num(yt_next)  # XG addition, avoid nans
         new_carry = err, yt_next, gts, iiter + 1
@@ -387,7 +411,7 @@ def deer_iteration_helper(
         iter_inp: Tuple[jnp.ndarray, jnp.ndarray, List[jnp.ndarray], jnp.ndarray]
     ) -> bool:
         err, _, _, iiter = iter_inp
-        return jnp.logical_and(err > tol, iiter < max_iter)
+        return jnp.logical_and(err > tol_effective, iiter < max_iter)
 
     err = jnp.array(1e10, dtype=dtype)  # initial error should be very high
     gt = jnp.zeros(
@@ -593,6 +617,8 @@ def diagonal_deer_iteration_helper(
     preconditioner: Any=None, # Diagonal preconditioner
     clip_val: float=1e8,
     show_progress: bool = False,
+    tol: Optional[float] = None,
+    rtol: Optional[float] = None,
 ) -> Tuple[jnp.ndarray, Optional[List[jnp.ndarray]], Callable]:
     progress_cb = None
     progress_close = None
@@ -616,9 +642,11 @@ def diagonal_deer_iteration_helper(
     func2 = jax.vmap(func, in_axes=(0, 0, None))
 
     dtype = yinit_guess.dtype
-    # set the tolerance to be 1e-4 if dtype is float32, else 1e-7 for float64
-    tol = 1e-7 if dtype == jnp.float64 else 5e-4
-    rtol = 1e-4 if dtype == jnp.float64 else 1e-3
+    # set the tolerance to be 5e-4 if dtype is float32, else 1e-7 for float64
+    default_tol = 1e-7 if dtype == jnp.float64 else 5e-4
+    default_rtol = 1e-4 if dtype == jnp.float64 else 1e-3
+    tol_effective = default_tol if tol is None else tol
+    rtol_effective = default_rtol if rtol is None else rtol
 
     def iter_func(
         iter_inp: Tuple[jnp.ndarray, jnp.ndarray, List[jnp.ndarray], jnp.ndarray]
@@ -656,7 +684,7 @@ def diagonal_deer_iteration_helper(
 
         # err = jnp.max(jnp.abs(yt_next - yt))  # checking convergence
         # relative tolerance
-        err = jnp.max( jnp.abs(yt_next - yt) - rtol * jnp.abs(yt) )
+        err = jnp.max( jnp.abs(yt_next - yt) - rtol_effective * jnp.abs(yt) )
 
         next_iiter = iiter + 1
         if progress_cb is not None:
@@ -690,7 +718,7 @@ def diagonal_deer_iteration_helper(
         yt_next = inv_lin(gts, rhs, inv_lin_params)  # (nsamples, ny)
 
         # err = jnp.max(jnp.abs(yt_next - yt))  # checking convergence
-        err = jnp.max( jnp.abs(yt_next - yt) - rtol * jnp.abs(yt) )
+        err = jnp.max( jnp.abs(yt_next - yt) - rtol_effective * jnp.abs(yt) )
 
         yt_next = jnp.nan_to_num(yt_next)  # XG addition, avoid nans
         new_carry = err, yt_next, gts, iiter + 1
@@ -700,7 +728,7 @@ def diagonal_deer_iteration_helper(
         iter_inp: Tuple[jnp.ndarray, jnp.ndarray, List[jnp.ndarray], jnp.ndarray]
     ) -> bool:
         err, _, _, iiter = iter_inp
-        return jnp.logical_and(err > tol, iiter < max_iter)
+        return jnp.logical_and(err > tol_effective, iiter < max_iter)
 
     err = jnp.array(1e10, dtype=dtype)  # initial error should be very high
     gt = jnp.zeros(

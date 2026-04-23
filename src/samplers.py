@@ -138,7 +138,7 @@ class ParallelHMC:
     # our constructor
     def __init__(self, log_prob, dim, chain_length, max_iter, alg="quasi",
                  clip_val=1.0, damp_factor=1.0, full_trace=False, basis_transformation=False,
-                 show_progress=False):
+                 show_progress=False, tol=None, rtol=None):
         '''
         Args:
             logp - unnormalized log-posterior function that ONLY takes in theta as argument. Use partial.
@@ -148,6 +148,8 @@ class ParallelHMC:
             qmem_efficient - are we using the Hutchinson's estimator?
             clip_val - what are we clipping individual gradient entries to in absolute value?
             damp_factor - slightly damping the Jacobian.
+            tol - absolute tolerance for parallel DEER Newton early stop (None = dtype default in deer).
+            rtol - relative tolerance scale for the Newton residual (None = dtype default in deer).
         '''
         # 1. internalize + get the target log-prob and grad
         self.log_prob = log_prob
@@ -161,6 +163,8 @@ class ParallelHMC:
         self.full_trace = full_trace 
         self.basis_transformation = basis_transformation
         self.show_progress = show_progress
+        self.tol = tol
+        self.rtol = rtol
 
     def scan_leapfrog(self, state, step_size):
         # Assumes you start and end 
@@ -225,6 +229,8 @@ class ParallelHMC:
             quasi=False, qmem_efficient=False, clip_val=self.clip_val,
             full_trace=self.full_trace, damp_factor=self.damp_factor,
             show_progress=self.show_progress,
+            tol=self.tol,
+            rtol=self.rtol,
         )
 
         # if self.basis_transformation:
