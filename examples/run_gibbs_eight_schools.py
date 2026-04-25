@@ -95,7 +95,7 @@ def gibbs_sample_tausq(nu_0, tausq_0, mu_0, kappa_0, mu, thetas, zs):
     # return ScaledInvChiSq(nu_N, tausq_N).sample()
     return 0.5 * nu_N * tausq_N * zs
 
-def fxn_for_deer(state, driver, params):
+def fn_for_deer(state, driver, params):
     thetas, sigmasq, mu, tausq = jnp.split(state, (S, 2*S, 2*S+1))
 
     key, *skeys = jr.split(driver, 5)
@@ -124,16 +124,16 @@ params = {}
 n_warmup = 3
 for i in range(n_warmup):
     key, skey = jr.split(key)
-    initial_state = jax.vmap(fxn_for_deer, in_axes=(0,0,None))(initial_state, jr.split(skey, (B,)), params)
+    initial_state = jax.vmap(fn_for_deer, in_axes=(0,0,None))(initial_state, jr.split(skey, (B,)), params)
 
 # timing
-def fxn_for_scan(state, driver):
-  state = fxn_for_deer(state, driver, params)
+def fn_for_scan(state, driver):
+  state = fn_for_deer(state, driver, params)
   return state, state,
 
 @jax.jit
 def _run_model(initial_state, drivers):
-  _, out_states = jax.lax.scan(fxn_for_scan, initial_state, drivers[1:])
+  _, out_states = jax.lax.scan(fn_for_scan, initial_state, drivers[1:])
   return out_states
 run_model = jax.jit(jax.vmap(_run_model))
 out_states = run_model(initial_state, drivers)
@@ -144,14 +144,14 @@ max_deer_iter = 400
 max_elk_iter = 400
 
 batch_deer = jax.jit(jax.vmap(lambda init_state, drivers, yinit_guess : seq1d(
-    fxn_for_deer, init_state, drivers[1:], params, yinit_guess=yinit_guess, 
+    fn_for_deer, init_state, drivers[1:], params, yinit_guess=yinit_guess, 
     max_iter=max_deer_iter, quasi=False, qmem_efficient=False, full_trace=False)))
 outputs_deer = batch_deer(initial_state, drivers, yinit_guess)
 
 preconditioner = jnp.concatenate((10.0*jnp.ones((8,)), 1000*jnp.ones((8,)), 10*jnp.ones((2,))))
 params['key']=jr.PRNGKey(321)
 batch_qdeer = jax.jit(jax.vmap(lambda init_state, drivers, yinit_guess : seq1d(
-    fxn_for_deer, init_state, drivers[1:], params, yinit_guess=yinit_guess, 
+    fn_for_deer, init_state, drivers[1:], params, yinit_guess=yinit_guess, 
     max_iter=max_deer_iter, quasi=True, qmem_efficient=True, full_trace=False, 
     preconditioner=preconditioner, clip_val=1.0)))
 outputs_qdeer = batch_qdeer(initial_state, drivers, yinit_guess)

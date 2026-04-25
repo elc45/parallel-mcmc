@@ -47,7 +47,7 @@ class ParallelMALA:
         if self.window_size is not None:
             assert 1 <= self.window_size <= self.chain_length
         
-    def mala_fxn_for_seq(self, state, driver, params):
+    def mala_fn_for_seq(self, state, driver, params):
         step_size = params["step_size"]
         key, *skeys = jr.split(driver, 3)
 
@@ -72,13 +72,13 @@ class ParallelMALA:
 
         return next_state
 
-    def mala_fxn_for_deer(self, state, driver, params):
+    def mala_fn_for_deer(self, state, driver, params):
         # if transform basis, do initial transformation (assume orthogonal)
         if self.basis_transformation:
             state = params["basis"] @ state 
 
         # then run seq update
-        next_state = self.mala_fxn_for_seq(state, driver, params)
+        next_state = self.mala_fn_for_seq(state, driver, params)
 
         # transform reverse
         if self.basis_transformation:
@@ -94,7 +94,7 @@ class ParallelMALA:
             yinit_guess = jnp.einsum('...ij, ...j -> ...i', params["basis"].T, yinit_guess)
 
         out_states, iters = qdeer.seq1d(
-            self.mala_fxn_for_deer, initial_state, drivers, params, 
+            self.mala_fn_for_deer, initial_state, drivers, params, 
             yinit_guess=yinit_guess, max_iter=self.max_iter, clip_val=self.clip_val,
             full_trace=self.full_trace, damp_factor=self.damp_factor
         )
@@ -112,7 +112,7 @@ class ParallelMALA:
             yinit_guess = jnp.einsum('...ij, ...j -> ...i', params["basis"].T, yinit_guess)
 
         out_states, iters = windowed_qdeer.seq1d(
-            self.mala_fxn_for_deer, initial_state, drivers, params, self.window_size,
+            self.mala_fn_for_deer, initial_state, drivers, params, self.window_size,
             yinit_guess=yinit_guess, max_iter=self.max_iter, clip_val=self.clip_val,
             full_trace=self.full_trace, damp_factor=self.damp_factor
         )
@@ -124,12 +124,12 @@ class ParallelMALA:
 
     def run_sequential_mala(self, key, initial_state, params):
 
-        def _fxn_for_scan(state, driver):
-            state = self.mala_fxn_for_seq(state, driver, params)
+        def _fn_for_scan(state, driver):
+            state = self.mala_fn_for_seq(state, driver, params)
             return state, state 
 
         drivers = jr.split(key, (self.chain_length,))
-        _, out_states = jax.lax.scan(_fxn_for_scan, initial_state, drivers)
+        _, out_states = jax.lax.scan(_fn_for_scan, initial_state, drivers)
 
         return out_states
 
@@ -178,7 +178,7 @@ class ParallelHMC:
         next_state = jnp.concatenate((z, m))
         return next_state
 
-    def hmc_fxn_for_deer(self, state, driver, params):
+    def hmc_fn_for_deer(self, state, driver, params):
         seed = driver
         z = state 
         step_size = params['epsilon'] 
@@ -207,24 +207,20 @@ class ParallelHMC:
 
     def run_sequential_hmc(self, key, initial_state, params):
 
-        def _fxn_for_scan(state, driver):
-            state = self.hmc_fxn_for_deer(state, driver, params)
+        def _fn_for_scan(state, driver):
+            state = self.hmc_fn_for_deer(state, driver, params)
             return state, state 
 
         drivers = jr.split(key, (self.chain_length,))
-        _, out_states = jax.lax.scan(_fxn_for_scan, initial_state, drivers)
+        _, out_states = jax.lax.scan(_fn_for_scan, initial_state, drivers)
 
         return out_states
 
     def run_parallel_hmc(self, key, initial_state, yinit_guess, params):
         drivers = jr.split(key, (self.chain_length,))
-
-        # if self.basis_transformation:
-        #     initial_state = params["basis"].T @ initial_state 
-        #     yinit_guess = jnp.einsum('...ij, ...j -> ...i', params["basis"].T, yinit_guess)
-
+        
         out_states, iters = deer.seq1d(
-            self.hmc_fxn_for_deer, initial_state, drivers, params, 
+            self.hmc_fn_for_deer, initial_state, drivers, params, 
             yinit_guess=yinit_guess, max_iter=self.max_iter, 
             quasi=False, qmem_efficient=False, clip_val=self.clip_val,
             full_trace=self.full_trace, damp_factor=self.damp_factor,
@@ -232,8 +228,5 @@ class ParallelHMC:
             tol=self.tol,
             rtol=self.rtol,
         )
-
-        # if self.basis_transformation:
-        #     out_states = jnp.einsum('...ij, ...j -> ...i', params["basis"], out_states)
 
         return out_states, iters 
