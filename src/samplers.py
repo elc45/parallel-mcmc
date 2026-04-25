@@ -138,7 +138,6 @@ class ParallelMALA:
 
 
 class ParallelHMC:
-
     log_prob: Callable
     D: int
     chain_length: int

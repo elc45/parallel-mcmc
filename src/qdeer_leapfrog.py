@@ -34,18 +34,18 @@ def seq1d(
     ---------
     func: Callable[[jnp.ndarray, Any, Any], jnp.ndarray]
         Function to evaluate the next output signal y[i + 1] from the current output signal y[i].
-        The arguments are: output signal y (ny,), input signal x (*nx,) in a pytree, and parameters.
-        The return value is the next output signal y[i + 1] (ny,).
+        The arguments are: output signal y (D,), input signal x (*nx,) in a pytree, and parameters.
+        The return value is the next output signal y[i + 1] (D,).
     y0: jnp.ndarray
-        Initial condition on y (ny,).
+        Initial condition on y (D,).
     xinp: Any
-        The external input signal in a pytree of shape (nsamples, *nx)
+        The external input signal in a pytree of shape (T, *nx)
     params: Any
         The parameters of the function ``func``. This should contain the step size epsilon. 
     logp: Callable
         Function to compute target density given a state in leapfrog. 
     yinit_guess: jnp.ndarray or None
-        The initial guess of the output signal (nsamples, ny).
+        The initial guess of the output signal (T, D).
         If None, it will be initialized as 0s.
     max_iter: int
         The maximum number of iterations to perform.
@@ -63,7 +63,7 @@ def seq1d(
     Returns
     -------
     y: jnp.ndarray
-        The output signal as the solution of the discrete difference equation (nsamples, ny),
+        The output signal as the solution of the discrete difference equation (T, D),
         excluding the initial states.
     """
     # set the default initial guess
@@ -71,17 +71,17 @@ def seq1d(
     if yinit_guess is None:
         yinit_guess = jnp.zeros(
             (xinp_flat.shape[0], y0.shape[-1]), dtype=xinp_flat.dtype
-        )  # (nsamples, ny)
+        )  # (T, D)
 
     def func2(ylist: List[jnp.ndarray], x: Any, params: Any) -> jnp.ndarray:
-        # ylist: (ny,)
+        # ylist: (D,)
         return func(ylist[0], x, params)
 
     def shifter_func(y: jnp.ndarray, shifter_params: Any) -> List[jnp.ndarray]:
-        # y: (nsamples, ny)
+        # y: (T, D)
         # shifter_params = (y0,)
         (y0,) = shifter_params
-        y = jnp.concatenate((y0[None, :], y[:-1, :]), axis=0)  # (nsamples, ny)
+        y = jnp.concatenate((y0[None, :], y[:-1, :]), axis=0)  # (T, D)
         return [y]
 
     # perform the deer iteration
@@ -93,7 +93,7 @@ def seq1d(
         shifter_func=shifter_func,
         params=params,
         xinput=xinp,
-        inv_lin_params=(y0,),
+        init=y0,
         shifter_func_params=(y0,),
         yinit_guess=yinit_guess,
         max_iter=max_iter,
@@ -110,14 +110,14 @@ def seq1d(
 
 
 def deer_iteration(
-    inv_lin: Callable[[List[jnp.ndarray], jnp.ndarray, Any], jnp.ndarray],
+    inv_lin: Callable[[List[jnp.ndarray], jnp.ndarray, jnp.ndarray], jnp.ndarray],
     func: Callable[[List[jnp.ndarray], Any, Any], jnp.ndarray],
     logp: Callable[jnp.ndarray, jnp.ndarray],
-    shifter_func: Callable[[jnp.ndarray], List[jnp.ndarray]],
+    shifter_func: Callable[[jnp.ndarray, Any], List[jnp.ndarray]],
     p_num: int,
     params: Any,  # gradable
     xinput: Any,  # gradable
-    inv_lin_params: Any,  # gradable
+    init: jnp.ndarray,  # gradable
     shifter_func_params: Any,  # gradable
     yinit_guess: jnp.ndarray,  # gradable as 0
     max_iter: int = 100,
@@ -131,31 +131,31 @@ def deer_iteration(
 
     Arguments
     ---------
-    inv_lin: Callable[[List[jnp.ndarray], jnp.ndarray, Any], jnp.ndarray]
+    inv_lin: Callable[[List[jnp.ndarray], jnp.ndarray, jnp.ndarray], jnp.ndarray]
         Inverse of the linear operator.
-        Takes the list of G-matrix (nsamples, ny, ny) (p-elements),
-        the right hand side of the equation (nsamples, ny), and the inv_lin parameters in a tree.
-        Returns the results of the inverse linear operator (nsamples, ny).
+        Takes the list of G-matrix (T, D, D) (p-elements),
+        the right hand side of the equation (T, D), and the initial state ``init`` (D,).
+        Returns the results of the inverse linear operator (T, D).
     func: Callable[[List[jnp.ndarray], Any, Any], jnp.ndarray]
         The non-linear function.
-        Function that takes the list of y [output: (ny,)] (p elements), x [input: (*nx)] (in a pytree),
+        Function that takes the list of y [output: (D,)] (p elements), x [input: (*nx)] (in a pytree),
         and parameters (any structure of pytree).
         Returns the output of the function.
     shifter_func: Callable[[jnp.ndarray, Any], List[jnp.ndarray]]
         The function that shifts the input signal.
-        It takes the signal of shape (nsamples, ny) and produces a list of shifted signals of shape (nsamples, ny).
+        It takes the signal of shape (T, D) and produces a list of shifted signals of shape (T, D).
     p_num: int
         Number of how many dependency on values of ``y`` at different places the function ``func`` has
     params: Any
         The parameters of the function ``func``.
     xinput: Any
-        The external input signal of in a pytree with shape (nsamples, *nx).
-    inv_lin_params: tree structure of jnp.ndarray
-        The parameters of the function ``inv_lin``.
+        The external input signal of in a pytree with shape (T, *nx).
+    init: jnp.ndarray
+        Initial condition (D,) passed to ``inv_lin`` (left boundary for the linear recurrence).
     shifter_func_params: tree structure of jnp.ndarray
         The parameters of the function ``shifter_func``.
     yinit_guess: jnp.ndarray or None
-        The initial guess of the output signal (nsamples, ny).
+        The initial guess of the output signal (T, D).
         If None, it will be initialized as 0s.
     max_iter: int
         The maximum number of iterations to perform.
@@ -172,7 +172,7 @@ def deer_iteration(
     Returns
     -------
     y: jnp.ndarray
-        The output signal as the solution of the non-linear differential equations (nsamples, ny).
+        The output signal as the solution of the non-linear differential equations (T, D).
     """
     yt, _, _, _, samp_iters = block_diagonal_deer_iteration_helper(
         inv_lin=inv_lin,
@@ -182,7 +182,7 @@ def deer_iteration(
         p_num=p_num,
         params=params,
         xinput=xinput,
-        inv_lin_params=inv_lin_params,
+        init=init,
         shifter_func_params=shifter_func_params,
         yinit_guess=yinit_guess,
         max_iter=max_iter,
@@ -240,70 +240,67 @@ def block_diagonal_matmul_recursive(
     Arguments
     ---------
     mats: jnp.ndarray
-        The diagonals of the block diagonal components of the matrices to be multiplied, shape (nsamples - 1, 4, ny/2)
+        The diagonals of the block diagonal components of the matrices to be multiplied, shape (T - 1, 4, D/2)
     vecs: jnp.ndarray
-        The vector to be multiplied, shape (nsamples - 1, ny)
+        The vector to be multiplied, shape (T - 1, D)
     y0: jnp.ndarray
-        The initial condition, shape (ny,)
+        The initial condition, shape (D,)
 
     Returns
     -------
     result: jnp.ndarray
-        The result of the matrix multiplication, shape (nsamples, ny)
+        The result of the matrix multiplication, shape (T, D)
     """
     # shift the elements by one index
     # diags of identity matrix
     half_D = mats.shape[-1]
-    eye = jnp.vstack(( jnp.ones((1, half_D)), jnp.zeros((2, half_D)), jnp.ones((1, half_D))))[None, ...] # (1, 4, ny/2)
-    first_elem = jnp.concatenate((eye, mats), axis=0)  # (nsamples, 4, ny/2)
-    second_elem = jnp.concatenate((y0[None], vecs), axis=0)  # (nsamples, ny)
+    eye = jnp.vstack(( jnp.ones((1, half_D)), jnp.zeros((2, half_D)), jnp.ones((1, half_D))))[None, ...] # (1, 4, D/2)
+    first_elem = jnp.concatenate((eye, mats), axis=0)  # (T, 4, D/2)
+    second_elem = jnp.concatenate((y0[None], vecs), axis=0)  # (T, D)
 
     # perform the scan
     elems = (first_elem, second_elem)
     _, yt = jax.lax.associative_scan(diagonal_block_binary_operator, elems)
-    return yt  # (nsamples, ny)
+    return yt  # (T, D)
 
 
 def block_diagonal_seq1d_inv_lin(
-    gmat: List[jnp.ndarray], rhs: jnp.ndarray, inv_lin_params: Tuple[jnp.ndarray]
+    gmat: List[jnp.ndarray], rhs: jnp.ndarray, init: jnp.ndarray
 ) -> jnp.ndarray:
     """
     Inverse of the linear operator for solving the discrete sequential equation.
-    y[i + 1] + G[i] y[i] = rhs[i], y[0] = y0.
+    y[i + 1] + G[i] y[i] = rhs[i], y[0] = init.
 
     Arguments
     ---------
     gmat: jnp.ndarray
-        The list of 1 G-matrix of shape (nsamples, ny). NOTE: these G-matrices must be diagonal (XG addition)
+        The list of 1 G-matrix of shape (T, D). NOTE: these G-matrices must be diagonal (XG addition)
     rhs: jnp.ndarray
-        The right hand side of the equation of shape (nsamples, ny).
-    inv_lin_params: Tuple[jnp.ndarray]
-        The parameters of the linear operator.
-        The first element is the initial condition (ny,).
+        The right hand side of the equation of shape (T, D).
+    init: jnp.ndarray
+        Initial condition (D,) for the linear recurrence.
 
     Returns
     -------
     y: jnp.ndarray
-        The solution of the linear equation of shape (nsamples, ny).
+        The solution of the linear equation of shape (T, D).
     """
-    # extract the parameters
-    (y0,) = inv_lin_params
     gmat = gmat[0]
 
     # compute the recursive matrix multiplication and drop the first element
-    yt = block_diagonal_matmul_recursive(-gmat, rhs, y0)[1:]  # (nsamples, ny)
+    yt = block_diagonal_matmul_recursive(-gmat, rhs, init)[1:]  # (T, D)
     return yt
 
 
 def block_diagonal_deer_iteration_helper(
-    inv_lin: Callable[[List[jnp.ndarray], jnp.ndarray, Any], jnp.ndarray],
+    inv_lin: Callable[[List[jnp.ndarray], jnp.ndarray, jnp.ndarray], jnp.ndarray],
     func: Callable[[List[jnp.ndarray], Any, Any], jnp.ndarray],
     logp: Callable[jnp.ndarray, jnp.ndarray],
     shifter_func: Callable[[jnp.ndarray, Any], List[jnp.ndarray]],
     p_num: int,
     params: Any,  # gradable
     xinput: Any,  # gradable
-    inv_lin_params: Any,  # gradable
+    init: jnp.ndarray,  # gradable
     shifter_func_params: Any,  # gradable
     yinit_guess: jnp.ndarray,
     max_iter: int = 100,
@@ -332,7 +329,7 @@ def block_diagonal_deer_iteration_helper(
     ) -> Tuple[jnp.ndarray, jnp.ndarray, List[jnp.ndarray], jnp.ndarray]:
         err, yt, gt_, iiter = iter_inp
         # gt_ is not used, but it is needed to return at the end of scan iteration
-        # yt: (nsamples, ny)
+        # yt: (T, D)
         ytparams = shifter_func(yt, shifter_func_params)
         # XG change to be more memory efficient
         if qmem_efficient:
@@ -348,14 +345,14 @@ def block_diagonal_deer_iteration_helper(
                    ytparams[0], xinput, params, logp
                )
             ]
-        # rhs: (nsamples, ny)
+        # rhs: (T, D)
         rhs = func2(ytparams, xinput, params)  # (carry, input, params) 
         rhs += sum(
             [
                 multiply_diags_vec(gt, ytp) for gt, ytp in zip(gts, ytparams)
             ]  # adjusted to deal with scalars
         )
-        yt_next = inv_lin(gts, rhs, inv_lin_params)  # (nsamples, ny)
+        yt_next = inv_lin(gts, rhs, init)  # (T, D)
 
         if clip_ytnext:
             clip = 1e8
@@ -368,7 +365,7 @@ def block_diagonal_deer_iteration_helper(
     def scan_func(iter_inp, args):
         err, yt, gt_, iiter = iter_inp
         # gt_ is not used, but it is needed to return at the end of scan iteration
-        # yt: (nsamples, ny)
+        # yt: (T, D)
         ytparams = shifter_func(yt, shifter_func_params)
         if qmem_efficient:
             print("efficient")
@@ -383,14 +380,14 @@ def block_diagonal_deer_iteration_helper(
                    ytparams[0], xinput, params, logp
                )
             ]
-        # rhs: (nsamples, ny)
+        # rhs: (T, D)
         rhs = func2(ytparams, xinput, params)  # (carry, input, params) 
         rhs += sum(
             [
                 multiply_diags_vec(gt, ytp) for gt, ytp in zip(gts, ytparams)
             ]  # adjusted to deal with scalars
         )
-        yt_next = inv_lin(gts, rhs, inv_lin_params)  # (nsamples, ny)
+        yt_next = inv_lin(gts, rhs, init)  # (T, D)
 
         err = jnp.max(jnp.abs(yt_next - yt))  # checking convergence
         yt_next = jnp.nan_to_num(yt_next)  # XG addition, avoid nans
@@ -424,7 +421,7 @@ def block_diagonal_deer_iteration_helper(
         gts = None
         rhs = None 
     else:
-        rhs = jnp.zeros_like(gts[0])  # (nsamples, ny)
+        rhs = jnp.zeros_like(gts[0])  # (T, D)
     return yt, gts, rhs, func, samp_iters
 
 

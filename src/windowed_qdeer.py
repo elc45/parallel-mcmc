@@ -33,14 +33,14 @@ def seq1d(
     if yinit_guess is None:
         yinit_guess = jnp.zeros(
             (xinp_flat.shape[0], y0.shape[-1]), dtype=xinp_flat.dtype
-        )  # (nsamples, ny)
+        )  # (T, D)
 
     def func2(y: jnp.ndarray, x: Any, params: Any) -> jnp.ndarray:
-        # ylist: (ny,)
+        # ylist: (D,)
         return func(y, x, params)
 
     def shifter_func(y: jnp.ndarray, y0: jnp.ndarray) -> jnp.ndarray:
-        y = jnp.concatenate((y0[None, :], y[:-1, :]), axis=0)  # (nsamples, ny)
+        y = jnp.concatenate((y0[None, :], y[:-1, :]), axis=0)  # (T, D)
         return y
 
     yt, samp_iters = diagonal_deer_iteration_helper(
@@ -93,52 +93,52 @@ def diagonal_matmul_recursive(
     Arguments
     ---------
     mats: jnp.ndarray
-        The matrices to be multiplied, shape (nsamples - 1, ny) # changed to make the matrices diagonal
+        The matrices to be multiplied, shape (T - 1, D) # changed to make the matrices diagonal
     vecs: jnp.ndarray
-        The vector to be multiplied, shape (nsamples - 1, ny)
+        The vector to be multiplied, shape (T - 1, D)
     y0: jnp.ndarray
-        The initial condition, shape (ny,)
+        The initial condition, shape (D,)
 
     Returns
     -------
     result: jnp.ndarray
-        The result of the matrix multiplication, shape (nsamples, ny)
+        The result of the matrix multiplication, shape (T, D)
     """
     # shift the elements by one index
-    eye = jnp.ones(mats.shape[-1], dtype=mats.dtype)[None]  # (1, ny)
-    first_elem = jnp.concatenate((eye, mats), axis=0)  # (nsamples, ny)
-    second_elem = jnp.concatenate((y0[None], vecs), axis=0)  # (nsamples, ny)
+    eye = jnp.ones(mats.shape[-1], dtype=mats.dtype)[None]  # (1, D)
+    first_elem = jnp.concatenate((eye, mats), axis=0)  # (T, D)
+    second_elem = jnp.concatenate((y0[None], vecs), axis=0)  # (T, D)
 
     # perform the scan
     elems = (first_elem, second_elem)
     _, yt = jax.lax.associative_scan(diagonal_binary_operator, elems)
-    return yt  # (nsamples, ny)
+    return yt  # (T, D)
 
 
 def diagonal_seq1d_inv_lin(
-    gmat: jnp.ndarray, rhs: jnp.ndarray, y0: jnp.ndarray
+    gmat: List[jnp.ndarray], rhs: jnp.ndarray, init: jnp.ndarray
 ) -> jnp.ndarray:
     """
     Inverse of the linear operator for solving the discrete sequential equation.
-    y[i + 1] + G[i] y[i] = rhs[i], y[0] = y0.
+    y[i + 1] + G[i] y[i] = rhs[i], y[0] = init.
 
     Arguments
     ---------
-    gmat: jnp.ndarray
-        The list of 1 G-matrix of shape (nsamples, ny). NOTE: these G-matrices must be diagonal (XG addition)
+    gmat: List[jnp.ndarray]
+        Length-1 list whose element has shape (T, D) (diagonal G). NOTE: must be diagonal (XG addition).
     rhs: jnp.ndarray
-        The right hand side of the equation of shape (nsamples, ny).
-    inv_lin_params: Tuple[jnp.ndarray]
-        The parameters of the linear operator.
-        The first element is the initial condition (ny,).
+        The right hand side of the equation of shape (T, D).
+    init: jnp.ndarray
+        Initial condition (D,) for the linear recurrence (e.g. left boundary of the current window).
 
     Returns
     -------
     y: jnp.ndarray
-        The solution of the linear equation of shape (nsamples, ny).
+        The solution of the linear equation of shape (T, D).
     """
+    gmat = gmat[0]
     # compute the recursive matrix multiplication and drop the first element
-    yt = diagonal_matmul_recursive(-gmat, rhs, y0)[1:]  # (nsamples, ny)
+    yt = diagonal_matmul_recursive(-gmat, rhs, init)[1:]  # (T, D)
     return yt
 
 def set_after_index_2d(arr, t, value):
@@ -194,7 +194,7 @@ def diagonal_deer_iteration_helper(
             ytparams, xinp_win, params, deer_jvp, keys)
         gts = -jnp.clip(damp_factor / precond[None,:] * gts, -clip_val, clip_val)
         rhs += gts * ytparams 
-        yt_next_win = inv_lin(gts, rhs, y_init)  # (nsamples, ny)
+        yt_next_win = inv_lin(gts, rhs, y_init)  # (T, D)
 
         if clip_ytnext:
             clip = 1e8
@@ -234,7 +234,7 @@ def diagonal_deer_iteration_helper(
             ytparams, xinp_win, params, deer_jvp, keys)
         gts = -jnp.clip(damp_factor / precond[None,:] * gts, -clip_val, clip_val)
         rhs += gts * ytparams 
-        yt_next_win = inv_lin(gts, rhs, y_init)  # (nsamples, ny)
+        yt_next_win = inv_lin(gts, rhs, y_init)  # (T, D)
 
         if clip_ytnext:
             clip = 1e8

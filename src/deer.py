@@ -105,7 +105,7 @@ def seq1d(
     Returns
     -------
     y: jnp.ndarray
-        The output signal as the solution of the discrete difference equation (nsamples, ny),
+        The output signal as the solution of the discrete difference equation (T, D),
         excluding the initial states.
     """
     # set the default initial guess
@@ -113,7 +113,7 @@ def seq1d(
     if yinit_guess is None:
         yinit_guess = jnp.zeros(
             (xinp_flat.shape[0], y0.shape[-1]), dtype=xinp_flat.dtype
-        )  # (nsamples, ny)
+        )  # (T, D)
 
     def shifter_func(y: jnp.ndarray, shifter_params: Any) -> jnp.ndarray:
         """
@@ -130,7 +130,7 @@ def seq1d(
             shifter_func=shifter_func,
             params=params,
             xinput=xinp,
-            inv_lin_params=(y0,),
+            init=y0,
             shifter_func_params=(y0,),
             yinit_guess=yinit_guess,
             max_iter=max_iter,
@@ -152,7 +152,7 @@ def seq1d(
             shifter_func=shifter_func,
             params=params,
             xinput=xinp,
-            inv_lin_params=(y0,),
+            init=y0,
             shifter_func_params=(y0,),
             yinit_guess=yinit_guess,
             max_iter=max_iter,
@@ -178,8 +178,51 @@ def deer_iteration(
     shifter_func: Callable[[jnp.ndarray, Any], jnp.ndarray],
     params: Any,
     xinput: Any,
-    inv_lin_params: Any,
+    init: Any,
     shifter_func_params: Any,
+    yinit_guess: jnp.ndarray,
+    max_iter: int = 100,
+    memory_efficient: bool = False,
+    clip_ytnext: bool = False,
+    full_trace: bool = False,  # XG addition
+    damp_factor: float=1.0, # Damping 
+    preconditioner: Any=None, # Diagonal preconditioner
+    clip_val: float=1e8,
+    show_progress: bool = False,
+    tol: Optional[float] = None,
+    rtol: Optional[float] = None,
+) -> jnp.ndarray:
+    yt, _, _, _, samp_iters = deer_iteration_helper(
+        inv_lin=inv_lin,
+        func=func,
+        shifter_func=shifter_func,
+        params=params,
+        xinput=xinput,
+        inv_lin_params=(init,),
+        shifter_func_params=shifter_func_params,
+        yinit_guess=yinit_guess,
+        max_iter=max_iter,
+        memory_efficient=memory_efficient,
+        clip_ytnext=clip_ytnext,
+        full_trace=full_trace,
+        damp_factor=damp_factor,
+        preconditioner=preconditioner, 
+        clip_val=clip_val,
+        show_progress=show_progress,
+        tol=tol,
+        rtol=rtol,
+    )
+    return (yt, samp_iters)
+
+
+def deer_iteration_helper(
+    inv_lin: Callable[[jnp.ndarray, jnp.ndarray, Any], jnp.ndarray],
+    func: Callable[[jnp.ndarray, Any, Any], jnp.ndarray],
+    shifter_func: Callable[[jnp.ndarray, Any], jnp.ndarray],
+    params: Any,  # gradable
+    xinput: Any,  # gradable
+    inv_lin_params: Any,  # gradable
+    shifter_func_params: Any,  # gradable
     yinit_guess: jnp.ndarray,
     max_iter: int = 100,
     memory_efficient: bool = False,
@@ -273,9 +316,9 @@ def deer_iteration(
         )
     if progress_close is not None:
         jax.debug.callback(progress_close, samp_iters, ordered=True)
+    rhs = jnp.zeros_like(gt[..., 0])  # (T, D)
     if memory_efficient:
         gt = None
-    rhs = jnp.zeros_like(gt[..., 0])  # (T, D)
     return Y_i, gt, rhs, func, samp_iters
 
 
@@ -283,48 +326,51 @@ def binary_operator(
     element_i: Tuple[jnp.ndarray, jnp.ndarray],
     element_j: Tuple[jnp.ndarray, jnp.ndarray],
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    # associative operator for the scan
-    gti, hti = element_i
-    gtj, htj = element_j
-    a = gtj @ gti
-    b = jnp.einsum("...ij,...j->...i", gtj, hti) + htj
+    """
+    The associative binary operator: 
+    (F_j ∘ F_i)(y) = M_j @ (M_i @ y + v_i) + v_j = (M_j @ M_i) @ y + (M_j @ v_i + v_j).
+    """
+    M_i, v_i = element_i
+    M_j, v_j = element_j
+    a = M_j @ M_i
+    b = jnp.einsum("...ij,...j->...i", M_j, v_i) + v_j
     return a, b
 
 
 def matmul_recursive(
-    mats: jnp.ndarray, vecs: jnp.ndarray, y0: jnp.ndarray
+    mats: jnp.ndarray, 
+    vecs: jnp.ndarray, 
+    y0: jnp.ndarray
 ) -> jnp.ndarray:
     """
     Solve the linear recurrence y[t+1] = mats[t] @ y[t] + vecs[t] for all t in parallel.
 
-    Composing two affine maps is itself an affine map: M_j @ (M_i @ y + v_i) + v_j = (M_j @ M_i) @ y + (M_j @ v_i + v_j).
-
     The initial condition y0 is encoded as the zeroth element (I, y0) so that all elements
     have the same shape as required by associative_scan. The output at index 0 recovers y0,
-    and subsequent indices give y[1], y[2], ..., y[nsamples].
+    and subsequent indices give y[1], y[2], ..., y[T].
 
     Arguments
     ---------
     mats: jnp.ndarray
-        The matrices to be multiplied, shape (nsamples - 1, ny, ny)
+        The matrices to be multiplied, shape (T - 1, D, D)
     vecs: jnp.ndarray
-        The vector to be multiplied, shape (nsamples - 1, ny)
+        The vector to be multiplied, shape (T - 1, D)
     y0: jnp.ndarray
-        The initial condition, shape (ny,)
+        The initial condition, shape (D,)
 
     Returns
     -------
     result: jnp.ndarray
-        The result of the matrix multiplication, shape (nsamples, ny)
+        The result of the matrix multiplication, shape (T, D)
     """
 
-    eye = jnp.eye(mats.shape[-1], dtype=mats.dtype)[None]  # (1, ny, ny)
-    first_elem = jnp.concatenate((eye, mats), axis=0)  # (nsamples, ny, ny)
-    second_elem = jnp.concatenate((y0[None], vecs), axis=0)  # (nsamples, ny)
+    eye = jnp.eye(mats.shape[-1], dtype=mats.dtype)[None]  # (1, D, D)
+    first_elem = jnp.concatenate((eye, mats), axis=0)  # (T, D, D)
+    second_elem = jnp.concatenate((y0[None], vecs), axis=0)  # (T, D)
 
     elems = (first_elem, second_elem)
     _, yt = jax.lax.associative_scan(binary_operator, elems)
-    return yt  # (nsamples, ny)
+    return yt
 
 
 def seq1d_inv_lin(
@@ -332,27 +378,26 @@ def seq1d_inv_lin(
 ) -> jnp.ndarray:
     """
     Inverse of the linear operator for solving the discrete sequential equation.
-    y[i + 1] + G[i] y[i] = rhs[i], y[0] = y0.
+    y[i + 1] + G[i] y[i] = rhs[i], y[0] = init.
 
     Arguments
     ---------
     gmat: jnp.ndarray
         The G-matrix of shape (nsamples, ny, ny).
     rhs: jnp.ndarray
-        The right hand side of the equation of shape (nsamples, ny).
-    inv_lin_params: Tuple[jnp.ndarray]
-        The parameters of the linear operator.
-        The first element is the initial condition (ny,).
+        The right hand side of the equation of shape (T, D).
+    init: jnp.ndarray
+        Initial condition (D,) for the linear recurrence.
 
     Returns
     -------
     y: jnp.ndarray
-        The solution of the linear equation of shape (nsamples, ny).
+        The solution of the linear equation of shape (T, D).
     """
     (y0,) = inv_lin_params
 
     # compute the recursive matrix multiplication and drop the first element
-    yt = matmul_recursive(-gmat, rhs, y0)[1:]  # (nsamples, ny)
+    yt = matmul_recursive(-gmat, rhs, y0)[1:]
     return yt
 
 # ---------------------------------------------------------------------------#
@@ -387,26 +432,26 @@ def diagonal_matmul_recursive(
     Arguments
     ---------
     mats: jnp.ndarray
-        The matrices to be multiplied, shape (nsamples - 1, ny) # changed to make the matrices diagonal
+        The matrices to be multiplied, shape (T - 1, D) # changed to make the matrices diagonal
     vecs: jnp.ndarray
-        The vector to be multiplied, shape (nsamples - 1, ny)
+        The vector to be multiplied, shape (T - 1, D)
     y0: jnp.ndarray
-        The initial condition, shape (ny,)
+        The initial condition, shape (D,)
 
     Returns
     -------
     result: jnp.ndarray
-        The result of the matrix multiplication, shape (nsamples, ny)
+        The result of the matrix multiplication, shape (T, D)
     """
     # shift the elements by one index
-    eye = jnp.ones(mats.shape[-1], dtype=mats.dtype)[None]  # (1, ny)
-    first_elem = jnp.concatenate((eye, mats), axis=0)  # (nsamples, ny)
-    second_elem = jnp.concatenate((y0[None], vecs), axis=0)  # (nsamples, ny)
+    eye = jnp.ones(mats.shape[-1], dtype=mats.dtype)[None]  # (1, D)
+    first_elem = jnp.concatenate((eye, mats), axis=0)  # (T, D)
+    second_elem = jnp.concatenate((y0[None], vecs), axis=0)  # (T, D)
 
     # perform the scan
     elems = (first_elem, second_elem)
     _, yt = jax.lax.associative_scan(diagonal_binary_operator, elems)
-    return yt  # (nsamples, ny)
+    return yt  # (T, D)
 
 
 def diagonal_seq1d_inv_lin(
@@ -414,27 +459,26 @@ def diagonal_seq1d_inv_lin(
 ) -> jnp.ndarray:
     """
     Inverse of the linear operator for solving the discrete sequential equation.
-    y[i + 1] + G[i] y[i] = rhs[i], y[0] = y0.
+    y[i + 1] + G[i] y[i] = rhs[i], y[0] = init.
 
     Arguments
     ---------
     gmat: jnp.ndarray
         The diagonal G-matrix of shape (nsamples, ny). (XG addition)
     rhs: jnp.ndarray
-        The right hand side of the equation of shape (nsamples, ny).
-    inv_lin_params: Tuple[jnp.ndarray]
-        The parameters of the linear operator.
-        The first element is the initial condition (ny,).
+        The right hand side of the equation of shape (T, D).
+    init: jnp.ndarray
+        Initial condition (D,) for the linear recurrence.
 
     Returns
     -------
     y: jnp.ndarray
-        The solution of the linear equation of shape (nsamples, ny).
+        The solution of the linear equation of shape (T, D).
     """
     (y0,) = inv_lin_params
 
     # compute the recursive matrix multiplication and drop the first element
-    yt = diagonal_matmul_recursive(-gmat, rhs, y0)[1:]  # (nsamples, ny)
+    yt = diagonal_matmul_recursive(-gmat, rhs, y0)[1:]  # (T, D)
     return yt
 
 
@@ -444,7 +488,7 @@ def diagonal_deer_iteration(
     shifter_func: Callable[[jnp.ndarray, Any], jnp.ndarray],
     params: Any,  # gradable
     xinput: Any,  # gradable
-    inv_lin_params: Any,  # gradable
+    init: jnp.ndarray,  # gradable
     shifter_func_params: Any,  # gradable
     yinit_guess: jnp.ndarray,
     max_iter: int = 100,
@@ -459,6 +503,7 @@ def diagonal_deer_iteration(
     tol: Optional[float] = None,
     rtol: Optional[float] = None,
 ) -> Tuple[jnp.ndarray, Optional[jnp.ndarray], Callable]:
+    inv_lin_params = (init,)
     progress_cb = None
     progress_close = None
     if show_progress and not full_trace:
@@ -568,9 +613,9 @@ def diagonal_deer_iteration(
         )
     if progress_close is not None:
         jax.debug.callback(progress_close, samp_iters, ordered=True)
+    rhs = jnp.zeros_like(gt)  # (nsamples, ny)
     if memory_efficient:
         gt = None
-    rhs = jnp.zeros_like(gt)  # (nsamples, ny)
     return yt, gt, rhs, func, samp_iters
 
 def quasi_diag_estimator(state, inputs, params, deer_jvp, key, num_samples=1):
