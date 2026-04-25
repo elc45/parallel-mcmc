@@ -159,14 +159,14 @@ def deer_iteration(
     preconditioner: Any=None, # Diagonal preconditioner
     clip_val: float=1e8
 ) -> jnp.ndarray:
-    """
+    f"""
     Perform the iteration from the DEER framework.
 
     Arguments
     ---------
     inv_lin: Callable[[List[jnp.ndarray], jnp.ndarray, Any], jnp.ndarray]
         Inverse of the linear operator.
-        Takes the list of G-matrix (nsamples, ny, ny) (p-elements),
+        Takes the list of G-matrix (nsamples, ny, ny) (p-elements, in this case p=1),
         the right hand side of the equation (nsamples, ny), and the inv_lin parameters in a tree.
         Returns the results of the inverse linear operator (nsamples, ny).
     func: Callable[[List[jnp.ndarray], Any, Any], jnp.ndarray]
@@ -178,11 +178,12 @@ def deer_iteration(
         The function that shifts the input signal.
         It takes the signal of shape (nsamples, ny) and produces a list of shifted signals of shape (nsamples, ny).
     p_num: int
-        Number of how many dependency on values of ``y`` at different places the function ``func`` has
+        Number of previous values in the recursion y_t+1 = func(y_t, x_t, params) the function takes as inputs
     params: Any
         The parameters of the function ``func``.
     xinput: Any
-        The external input signal of in a pytree with shape (nsamples, *nx).
+        The exogenous input signal x to the recursion y_t+1 = func(y_t, x_t, params) in a pytree with shape (nsamples, *nx).
+        For MCMC, these are just rng values.
     inv_lin_params: tree structure of jnp.ndarray
         The parameters of the function ``inv_lin``.
     shifter_func_params: tree structure of jnp.ndarray
@@ -378,7 +379,13 @@ def matmul_recursive(
     mats: jnp.ndarray, vecs: jnp.ndarray, y0: jnp.ndarray
 ) -> jnp.ndarray:
     """
-    Perform the matrix multiplication recursively, y[i + 1] = mats[i] @ y[i] + vec[i].
+    Solve the linear recurrence y[t+1] = mats[t] @ y[t] + vecs[t] for all t in parallel.
+
+    Composing two affine maps is itself an affine map: M_j @ (M_i @ y + v_i) + v_j = (M_j @ M_i) @ y + (M_j @ v_i + v_j).
+
+    The initial condition y0 is encoded as the zeroth element (I, y0) so that all elements
+    have the same shape as required by associative_scan. The output at index 0 recovers y0,
+    and subsequent indices give y[1], y[2], ..., y[nsamples].
 
     Arguments
     ---------
@@ -394,12 +401,11 @@ def matmul_recursive(
     result: jnp.ndarray
         The result of the matrix multiplication, shape (nsamples, ny)
     """
-    # shift the elements by one index
+
     eye = jnp.eye(mats.shape[-1], dtype=mats.dtype)[None]  # (1, ny, ny)
     first_elem = jnp.concatenate((eye, mats), axis=0)  # (nsamples, ny, ny)
     second_elem = jnp.concatenate((y0[None], vecs), axis=0)  # (nsamples, ny)
 
-    # perform the scan
     elems = (first_elem, second_elem)
     _, yt = jax.lax.associative_scan(binary_operator, elems)
     return yt  # (nsamples, ny)
