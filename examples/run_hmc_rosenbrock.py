@@ -15,11 +15,14 @@ tfd = tfp.distributions
 PLOT_DIR = Path(__file__).resolve().parent / "plots"
 PLOT_DIR.mkdir(parents=True, exist_ok=True)
 
-# tqdm + jax.debug.callback only when this file is executed (not on import).
 _SHOW_DEER_PROGRESS = __name__ == "__main__"
 
 target = gym.targets.VectorModel(gym.targets.Banana(curvature=0.05),
-                                 flatten_sample_transformations=True)
+                                  flatten_sample_transformations=True)
+
+#target = gym.targets.VectorModel(gym.targets.IllConditionedGaussian(ndims=2),
+#                                 flatten_sample_transformations=True)
+
 D = target.event_shape[0]
 
 def target_log_prob(x):
@@ -31,15 +34,14 @@ def target_log_prob(x):
     fldj = target.default_event_space_bijector.forward_log_det_jacobian(x)
     return target.unnormalized_log_prob(y) + fldj
 
-# define chain
-chain_length = 2500
+chain_length = 5000
 key = jr.PRNGKey(1313)
 key, skey = jr.split(key)
 initial_state = 0. + 10. * jr.normal(skey, (D,))
-max_iter = 2510 # max number of parallel iters
+max_iter = 2510
 damp_factor = 0.55
-tol = 1e-8
-rtol = 1e-8
+tol = 1e-5
+rtol = 1e-5
 
 params = {}
 params["epsilon"] = 0.5
@@ -72,10 +74,18 @@ plt.title("Parallel samples at convergence vs. sequential samples")
 plt.legend()
 plt.savefig(PLOT_DIR / "hmc_rosenbrock_convergence2.png", dpi=150, bbox_inches="tight")
 
-# get full sample trace 
 max_iter = iters+1
-sampler = samplers.ParallelHMC(target_log_prob, D, chain_length, max_iter,
-    full_trace=True, damp_factor=damp_factor, show_progress=False)
+sampler = samplers.ParallelHMC(target_log_prob, 
+                                dim=D, 
+                                chain_length=chain_length, 
+                                max_iter=max_iter,
+                                full_trace=True, 
+                                damp_factor=damp_factor, 
+                                show_progress=False, 
+                                quasi=True,
+                                tol=tol,
+                                rtol=rtol)
+                                
 run_parallel = jax.jit(sampler.run_parallel_hmc)
 states_par, iters = run_parallel(key, initial_state, yinit_guess, params)
 
@@ -94,6 +104,6 @@ for ax_idx, itr in enumerate([1, 10, 25, max_iter], start=1):
     plt.title(f"Parallel Iteration {itr}", fontsize=24)
     if ax_idx == 1:
         plt.legend(["Sequential", "Parallel"])
-plt.suptitle("100K HMC Samples", fontsize=16, fontweight="bold")
+plt.suptitle(f"{chain_length} HMC Samples", fontsize=16, fontweight="bold")
 plt.tight_layout()
-plt.savefig(PLOT_DIR / "hmc_rosenbrock_2d_evolution2.png", dpi=150, bbox_inches="tight")
+plt.savefig(PLOT_DIR / f"hmc_{target.name}_2d_evolution.png", dpi=150, bbox_inches="tight")

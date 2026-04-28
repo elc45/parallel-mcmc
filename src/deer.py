@@ -13,8 +13,6 @@ import jax.numpy as jnp
 import jax.random as jr
 import numpy as np
 
-from functools import partial
-
 
 def _make_seq1d_progress_callback(
     max_iter: int, desc: str
@@ -71,18 +69,20 @@ def seq1d(
     Arguments
     ---------
     func: Callable[[jnp.ndarray, Any, Any], jnp.ndarray]
-        Function to evaluate the next output signal y[i + 1] from the current output signal y[i].
-        The arguments are: output signal y (ny,), input signal x (*nx,) in a pytree, and parameters.
-        The return value is the next output signal y[i + 1] (ny,).
+        The Markov transition kernel.
+        The arguments are: the current state (D,), external input signal x (*nx,) in 
+        a pytree (in this case the RNG source), and other parameters of the transition kernel. For example,
+        for HMC, these parameters are the step size and the number of leapfrog steps. The return value 
+        is the next state (D,).
     y0: jnp.ndarray
-        Initial condition on y (ny,).
+        Initial state of the chain (D,).
     xinp: Any
-        The external input signal in a pytree of shape (nsamples, *nx)
+        The external input signal in a pytree of shape (T, *nx).
     params: Any
         The parameters of the function ``func``.
     yinit_guess: jnp.ndarray or None
-        The initial guess of the output signal (nsamples, ny).
-        If None, it will be initialized as 0s.
+        The initial guess of the full MCMC trajectory (T, D).
+        If None, it will be initialized to the 0 vector.
     max_iter: int
         The maximum number of iterations to perform.
     memory_efficient: bool
@@ -116,14 +116,15 @@ def seq1d(
         )  # (nsamples, ny)
 
     def shifter_func(y: jnp.ndarray, shifter_params: Any) -> jnp.ndarray:
-        # y: (nsamples, ny)
+        """
+        Shift y to the left by one step such that y[i+1] = y[i] and y[0] = y0; takes (T, D) -> (T, D).
+        """
         (y0,) = shifter_params
         y = jnp.concatenate((y0[None, :], y[:-1, :]), axis=0)  # (nsamples, ny)
         return y
 
-    # perform the deer iteration
     if quasi:
-        yt, samp_iters = deer_iteration(
+        yt, _, _, _, samp_iters = diagonal_deer_iteration_helper(
             inv_lin=diagonal_seq1d_inv_lin,
             func=func,
             shifter_func=shifter_func,
@@ -135,18 +136,17 @@ def seq1d(
             max_iter=max_iter,
             memory_efficient=memory_efficient,
             clip_ytnext=True,
-            quasi=quasi,
             full_trace=full_trace,
             qmem_efficient=qmem_efficient,
             damp_factor=damp_factor,
-            preconditioner=preconditioner, 
+            preconditioner=preconditioner,
             clip_val=clip_val,
             show_progress=show_progress,
             tol=tol,
             rtol=rtol,
         )
     else:
-        yt, samp_iters = deer_iteration(
+        yt, _, _, _, samp_iters = deer_iteration(
             inv_lin=seq1d_inv_lin,
             func=func,
             shifter_func=shifter_func,
@@ -158,11 +158,9 @@ def seq1d(
             max_iter=max_iter,
             memory_efficient=memory_efficient,
             clip_ytnext=True,
-            quasi=quasi,
             full_trace=full_trace,
-            qmem_efficient=qmem_efficient,
             damp_factor=damp_factor,
-            preconditioner=preconditioner, 
+            preconditioner=preconditioner,
             clip_val=clip_val,
             show_progress=show_progress,
             tol=tol,
@@ -178,132 +176,15 @@ def deer_iteration(
     inv_lin: Callable[[jnp.ndarray, jnp.ndarray, Any], jnp.ndarray],
     func: Callable[[jnp.ndarray, Any, Any], jnp.ndarray],
     shifter_func: Callable[[jnp.ndarray, Any], jnp.ndarray],
-    params: Any,  # gradable
-    xinput: Any,  # gradable
-    inv_lin_params: Any,  # gradable
-    shifter_func_params: Any,  # gradable
-    yinit_guess: jnp.ndarray,  # gradable as 0
-    max_iter: int = 100,
-    memory_efficient: bool = False,
-    clip_ytnext: bool = False,
-    quasi: bool = False,  # XG addition
-    qmem_efficient: bool = True,  # XG addition
-    full_trace: bool = False,  # XG addition
-    damp_factor: float=1.0, # Damping 
-    preconditioner: Any=None, # Diagonal preconditioner
-    clip_val: float=1e8,
-    show_progress: bool = False,
-    tol: Optional[float] = None,
-    rtol: Optional[float] = None,
-) -> jnp.ndarray:
-    """
-    Perform the iteration from the DEER framework.
-
-    Arguments
-    ---------
-    inv_lin: Callable[[jnp.ndarray, jnp.ndarray, Any], jnp.ndarray]
-        Inverse of the linear operator.
-        Takes the G-matrix (nsamples, ny, ny) [or (nsamples, ny) for diagonal variant],
-        the right hand side of the equation (nsamples, ny), and the inv_lin parameters in a tree.
-        Returns the results of the inverse linear operator (nsamples, ny).
-    func: Callable[[jnp.ndarray, Any, Any], jnp.ndarray]
-        The non-linear Markov transition f(y, x, params) -> y_next.
-        Takes output signal y (ny,), input signal x (*nx,) in a pytree, and parameters.
-        Returns the next output signal (ny,).
-    shifter_func: Callable[[jnp.ndarray, Any], jnp.ndarray]
-        Shifts the current iterate: takes (nsamples, ny) -> (nsamples, ny).
-    params: Any
-        The parameters of the function ``func``.
-    xinput: Any
-        The exogenous input signal in a pytree with shape (nsamples, *nx).
-        For MCMC, these are just rng values.
-    inv_lin_params: tree structure of jnp.ndarray
-        The parameters of the function ``inv_lin``.
-    shifter_func_params: tree structure of jnp.ndarray
-        The parameters of the function ``shifter_func``.
-    yinit_guess: jnp.ndarray or None
-        The initial guess of the output signal (nsamples, ny).
-    max_iter: int
-        The maximum number of iterations to perform.
-    memory_efficient: bool
-        If True, then do not save the Jacobian matrix for the backward pass.
-        This can save memory, but the backward pass will be slower due to recomputation of
-        the Jacobian matrix.
-    quasi: bool (XG addition)
-        If True, then make all the Jacobians diagonal
-    full_trace: bool (XG addition)
-        If True, then return all the intermediate y values (up to length max_iter)
-        If False, then return only the final y value (which may be decided by early stopping up to the tolerance)
-    tol: float or None
-        Absolute Newton tolerance; None selects dtype-specific defaults in the helper.
-    rtol: float or None
-        Relative scale in the Newton residual; None selects dtype-specific defaults.
-
-    Returns
-    -------
-    y: jnp.ndarray
-        The output signal as the solution of the non-linear differential equations (nsamples, ny).
-    """
-    if quasi:
-        yt, _, _, _, samp_iters = diagonal_deer_iteration_helper(
-            inv_lin=inv_lin,
-            func=func,
-            shifter_func=shifter_func,
-            params=params,
-            xinput=xinput,
-            inv_lin_params=inv_lin_params,
-            shifter_func_params=shifter_func_params,
-            yinit_guess=yinit_guess,
-            max_iter=max_iter,
-            memory_efficient=memory_efficient,
-            clip_ytnext=clip_ytnext,
-            full_trace=full_trace,
-            qmem_efficient=qmem_efficient,
-            damp_factor=damp_factor,
-            preconditioner=preconditioner, 
-            clip_val=clip_val,
-            show_progress=show_progress,
-            tol=tol,
-            rtol=rtol,
-        )
-        return (yt, samp_iters)
-    else:
-        yt, _, _, _, samp_iters = deer_iteration_helper(
-            inv_lin=inv_lin,
-            func=func,
-            shifter_func=shifter_func,
-            params=params,
-            xinput=xinput,
-            inv_lin_params=inv_lin_params,
-            shifter_func_params=shifter_func_params,
-            yinit_guess=yinit_guess,
-            max_iter=max_iter,
-            memory_efficient=memory_efficient,
-            clip_ytnext=clip_ytnext,
-            full_trace=full_trace,
-            damp_factor=damp_factor,
-            preconditioner=preconditioner, 
-            clip_val=clip_val,
-            show_progress=show_progress,
-            tol=tol,
-            rtol=rtol,
-        )
-        return (yt, samp_iters)
-
-
-def deer_iteration_helper(
-    inv_lin: Callable[[jnp.ndarray, jnp.ndarray, Any], jnp.ndarray],
-    func: Callable[[jnp.ndarray, Any, Any], jnp.ndarray],
-    shifter_func: Callable[[jnp.ndarray, Any], jnp.ndarray],
-    params: Any,  # gradable
-    xinput: Any,  # gradable
-    inv_lin_params: Any,  # gradable
-    shifter_func_params: Any,  # gradable
+    params: Any,
+    xinput: Any,
+    inv_lin_params: Any,
+    shifter_func_params: Any,
     yinit_guess: jnp.ndarray,
     max_iter: int = 100,
     memory_efficient: bool = False,
     clip_ytnext: bool = False,
-    full_trace: bool = False, # XG addition
+    full_trace: bool = False,
     damp_factor: float=1.0, # Damping 
     preconditioner: Any=None, # Diagonal preconditioner for Quasi
     clip_val: float=1e8,
@@ -311,10 +192,7 @@ def deer_iteration_helper(
     tol: Optional[float] = None,
     rtol: Optional[float] = None,
 ) -> Tuple[jnp.ndarray, Optional[jnp.ndarray], Callable]:
-    """
-    Notes:
-        - XG addition: full_trace, to return all the intermediate y values (up to length max_iter)
-    """
+
     progress_cb = None
     progress_close = None
     if show_progress and not full_trace:
@@ -348,7 +226,7 @@ def deer_iteration_helper(
             yt_next = jnp.clip(yt_next, a_min=-clip, a_max=clip)
             yt_next = jnp.where(jnp.isnan(yt_next), 0.0, yt_next)
 
-        err = jnp.max( jnp.abs(yt_next - yt) - rtol_effective * jnp.abs(yt) )
+        err = jnp.max(jnp.abs(yt_next - yt) - rtol_effective * jnp.abs(yt))
 
         next_iiter = iiter + 1
         if progress_cb is not None:

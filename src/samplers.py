@@ -4,11 +4,9 @@ import jax.numpy as jnp
 import jax.random as jr
 
 from collections.abc import Callable
-from functools import partial
 
-# core DEER + QDEER algorithms
 import src
-from src import deer, windowed_qdeer, elk
+from src import deer, windowed_qdeer
 
 from tensorflow_probability.substrates import jax as tfp
 tfd = tfp.distributions
@@ -146,6 +144,7 @@ class ParallelHMC:
     chain_length: int
     max_iter: int
     alg: str
+    quasi: bool
     clip_val: float
     damp_factor: float
     full_trace: bool
@@ -155,9 +154,20 @@ class ParallelHMC:
     rtol: float | None
     target_log_prob_and_grad: Callable
 
-    def __init__(self, log_prob: Callable, dim: int, chain_length: int, max_iter: int, alg: str = "quasi",
-                 clip_val: float = 1.0, damp_factor: float = 1.0, full_trace: bool = False, basis_transformation: bool = False,
-                 show_progress: bool = False, tol: float | None = None, rtol: float | None = None):
+    def __init__(self, 
+                log_prob: Callable, 
+                dim: int, 
+                chain_length: int, 
+                max_iter: int, 
+                alg: str = "quasi",
+                quasi: bool = True,
+                clip_val: float = 1.0, 
+                damp_factor: float = 1.0, 
+                full_trace: bool = False, 
+                basis_transformation: bool = False,
+                show_progress: bool = False, 
+                tol: float | None = None, 
+                rtol: float | None = None):
         '''
         Args:
             log_prob           - unnormalized log-posterior callable; must accept only the position
@@ -166,6 +176,8 @@ class ParallelHMC:
             chain_length       - number of HMC steps (length of the Markov chain).
             max_iter           - maximum number of DEER Newton iterations for the parallel solver.
             alg                - DEER variant to use (default "quasi").
+            quasi              - if True, use diagonal (quasi-Newton) Jacobians; if False, use full
+                                 Jacobians (default True).
             clip_val           - gradient entries are clipped to [-clip_val, clip_val] before the
                                  Newton update (default 1.0).
             damp_factor        - damping coefficient applied to the Jacobian in the Newton step
@@ -185,7 +197,8 @@ class ParallelHMC:
         self.chain_length = chain_length
         self.target_log_prob_and_grad = jax.value_and_grad(self.log_prob)
         self.max_iter = max_iter
-        self.alg = alg 
+        self.alg = alg
+        self.quasi = quasi
         self.clip_val = clip_val
         self.damp_factor = damp_factor
         self.full_trace = full_trace 
@@ -252,10 +265,17 @@ class ParallelHMC:
         drivers = jr.split(key, (self.chain_length,))
         
         out_states, iters = deer.seq1d(
-            self.hmc_fn_for_deer, initial_state, drivers, params, 
-            yinit_guess=yinit_guess, max_iter=self.max_iter, 
-            quasi=False, qmem_efficient=False, clip_val=self.clip_val,
-            full_trace=self.full_trace, damp_factor=self.damp_factor,
+            func=self.hmc_fn_for_deer, 
+            y0=initial_state, 
+            xinp=drivers, 
+            params=params, 
+            yinit_guess=yinit_guess, 
+            max_iter=self.max_iter, 
+            quasi=self.quasi, 
+            qmem_efficient=False, 
+            clip_val=self.clip_val,
+            full_trace=self.full_trace, 
+            damp_factor=self.damp_factor,
             show_progress=self.show_progress,
             tol=self.tol,
             rtol=self.rtol,
