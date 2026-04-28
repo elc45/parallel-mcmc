@@ -124,7 +124,7 @@ def seq1d(
         return y
 
     if quasi:
-        yt, _, _, _, samp_iters = diagonal_deer_iteration_helper(
+        yt, _, _, _, samp_iters = diagonal_deer_iteration(
             inv_lin=diagonal_seq1d_inv_lin,
             func=func,
             shifter_func=shifter_func,
@@ -212,42 +212,42 @@ def deer_iteration(
     def iter_func(
         iter_inp: Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]
     ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-        err, yt, gt_, iiter = iter_inp
-        # yt: (nsamples, ny)
-        ytparams = shifter_func(yt, shifter_func_params)
-        gt = -jnp.clip(damp_factor * jacfunc(ytparams, xinput, params), -clip_val, clip_val)
-        # rhs: (nsamples, ny)
-        rhs = func2(ytparams, xinput, params)
-        rhs += jnp.einsum("...ij,...j->...i", gt, ytparams)
-        yt_next = inv_lin(gt, rhs, inv_lin_params)  # (nsamples, ny)
+        err, Y_i, gt_, iiter = iter_inp
+        # Y_i: (T, D) — full trajectory at Newton iterate i
+        Y_i_shifted = shifter_func(Y_i, shifter_func_params)
+        gt = -jnp.clip(damp_factor * jacfunc(Y_i_shifted, xinput, params), -clip_val, clip_val)
+        # rhs: (T, D)
+        rhs = func2(Y_i_shifted, xinput, params)
+        rhs += jnp.einsum("...ij,...j->...i", gt, Y_i_shifted)
+        Y_i_next = inv_lin(gt, rhs, inv_lin_params)  # (T, D)
 
         if clip_ytnext:
             clip = 1e8
-            yt_next = jnp.clip(yt_next, a_min=-clip, a_max=clip)
-            yt_next = jnp.where(jnp.isnan(yt_next), 0.0, yt_next)
+            Y_i_next = jnp.clip(Y_i_next, a_min=-clip, a_max=clip)
+            Y_i_next = jnp.where(jnp.isnan(Y_i_next), 0.0, Y_i_next)
 
-        err = jnp.max(jnp.abs(yt_next - yt) - rtol_effective * jnp.abs(yt))
+        err = jnp.max(jnp.abs(Y_i_next - Y_i) - rtol_effective * jnp.abs(Y_i))
 
         next_iiter = iiter + 1
         if progress_cb is not None:
             jax.debug.callback(progress_cb, next_iiter, ordered=True)
-        return err, yt_next, gt, next_iiter
+        return err, Y_i_next, gt, next_iiter
 
     def scan_func(iter_inp, args):
-        err, yt, gt_, iiter = iter_inp
-        # yt: (nsamples, ny)
-        ytparams = shifter_func(yt, shifter_func_params)
-        gt = -jnp.clip(damp_factor * jacfunc(ytparams, xinput, params), -clip_val, clip_val)
-        # rhs: (nsamples, ny)
-        rhs = func2(ytparams, xinput, params)
-        rhs += jnp.einsum("...ij,...j->...i", gt, ytparams)
-        yt_next = inv_lin(gt, rhs, inv_lin_params)  # (nsamples, ny)
+        err, Y_i, gt_, iiter = iter_inp
+        # Y_i: (T, D) — full trajectory at Newton iterate i
+        Y_i_shifted = shifter_func(Y_i, shifter_func_params)
+        gt = -jnp.clip(damp_factor * jacfunc(Y_i_shifted, xinput, params), -clip_val, clip_val)
+        # rhs: (T, D)
+        rhs = func2(Y_i_shifted, xinput, params)
+        rhs += jnp.einsum("...ij,...j->...i", gt, Y_i_shifted)
+        Y_i_next = inv_lin(gt, rhs, inv_lin_params)  # (T, D)
 
-        err = jnp.max( jnp.abs(yt_next - yt) - rtol_effective * jnp.abs(yt) )
+        err = jnp.max( jnp.abs(Y_i_next - Y_i) - rtol_effective * jnp.abs(Y_i) )
 
-        yt_next = jnp.nan_to_num(yt_next)  # XG addition, avoid nans
-        new_carry = err, yt_next, gt, iiter + 1
-        return new_carry, yt_next
+        Y_i_next = jnp.nan_to_num(Y_i_next)
+        new_carry = err, Y_i_next, gt, iiter + 1
+        return new_carry, Y_i_next
 
     def cond_func(
         iter_inp: Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]
@@ -263,20 +263,20 @@ def deer_iteration(
 
     iiter = jnp.array(0, dtype=jnp.int32)
     if full_trace:
-        _, yt = jax.lax.scan(
+        _, Y_i = jax.lax.scan(
             scan_func, (err, yinit_guess, gt, iiter), None, length=max_iter
         )
         samp_iters = max_iter
     else:
-        _, yt, gt, samp_iters = jax.lax.while_loop(
+        _, Y_i, gt, samp_iters = jax.lax.while_loop(
             cond_func, iter_func, (err, yinit_guess, gt, iiter)
         )
     if progress_close is not None:
         jax.debug.callback(progress_close, samp_iters, ordered=True)
     if memory_efficient:
         gt = None
-    rhs = jnp.zeros_like(gt[..., 0])  # (nsamples, ny)
-    return yt, gt, rhs, func, samp_iters
+    rhs = jnp.zeros_like(gt[..., 0])  # (T, D)
+    return Y_i, gt, rhs, func, samp_iters
 
 
 def binary_operator(
@@ -438,7 +438,7 @@ def diagonal_seq1d_inv_lin(
     return yt
 
 
-def diagonal_deer_iteration_helper(
+def diagonal_deer_iteration(
     inv_lin: Callable[[jnp.ndarray, jnp.ndarray, Any], jnp.ndarray],
     func: Callable[[jnp.ndarray, Any, Any], jnp.ndarray],
     shifter_func: Callable[[jnp.ndarray, Any], jnp.ndarray],
