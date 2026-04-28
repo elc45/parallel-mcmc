@@ -220,54 +220,6 @@ def diagonal_block_binary_operator(
     b = jnp.concatenate((b1, b2), axis=-1) + htj
     return a, b
 
-# def diagonal_block_binary_operator(
-#     element_i: Tuple[jnp.ndarray, jnp.ndarray],
-#     element_j: Tuple[jnp.ndarray, jnp.ndarray],
-# ) -> Tuple[jnp.ndarray, jnp.ndarray]:
-#     """
-#     Function assumes leading batch dimension per call by associative scan.
-#     """
-#     # associative operator for the scan
-#     gti, hti = element_i
-#     gtj, htj = element_j
-#     # unpack gts into 4 diags
-#     # gti_11, gti_12, gti_21, gti_22 = jnp.split(gti, (1,2,3), axis=1)
-#     # gtj_11, gtj_12, gtj_21, gtj_22 = jnp.split(gtj, (1,2,3), axis=1)
-#     gti_11, gti_12, gti_21, gti_22 = jnp.split(gti, 4, axis=-2)
-#     gtj_11, gtj_12, gtj_21, gtj_22 = jnp.split(gtj, 4, axis=-2)
-#     # multiple diagonals
-#     a11 = gtj_11 * gti_11 + gtj_12 * gti_21
-#     a12 = gtj_11 * gti_12 + gtj_12 * gti_22
-#     a21 = gtj_21 * gti_11 + gtj_22 * gti_21
-#     a22 = gtj_21 * gti_12 + gtj_22 * gti_22
-#     a = jnp.concatenate((a11, a12, a21, a22), axis=-2)
-#     # multiply by vector
-#     h1, h2 = jnp.split(hti, 2, axis=-1)
-
-#     # v1
-#     # b1 = gtj_11[:, 0, :] * h1 + gtj_12[:, 0, :] * h2 
-#     # b2 = gtj_21[:, 0, :] * h1 + gtj_22[:, 0, :] * h2 
-#     # b1 = gtj_11[:, 0] * h1 + gtj_12[:, 0] * h2 
-#     # b2 = gtj_21[:, 0] * h1 + gtj_22[:, 0] * h2 
-
-#     # v2
-#     # b1 = jnp.squeeze(gtj_11) * h1 + jnp.squeeze(gtj_12) * h2 
-#     # b2 = jnp.squeeze(gtj_21) * h1 + jnp.squeeze(gtj_22) * h2 
-
-#     # v3
-#     # Apply matrix blocks to vector halves
-#     # Make sure we're getting the right dimensions by using explicit shapes
-#     gtj_11_flat = jnp.squeeze(gtj_11, axis=-2)
-#     gtj_12_flat = jnp.squeeze(gtj_12, axis=-2)
-#     gtj_21_flat = jnp.squeeze(gtj_21, axis=-2)
-#     gtj_22_flat = jnp.squeeze(gtj_22, axis=-2)
-#     # Compute the transformed vector parts
-#     b1 = gtj_11_flat * h1 + gtj_12_flat * h2
-#     b2 = gtj_21_flat * h1 + gtj_22_flat * h2
-
-#     b = jnp.concatenate((b1, b2), axis=-1) + htj
-#     return a, b
-
 
 def multiply_diags_vec(gts, yts):
     gt_11, gt_12, gt_21, gt_22 = jnp.split(gts, (1,2,3), axis=1)
@@ -488,25 +440,6 @@ def leapfrog_derivative_diag_blocks(state, inputs, params, logp):
     out = jnp.vstack(( diag11, diag12, diag21, diag22 ))
     return out
 
-
-"""
-def leapfrog_derivative_diag_blocks_mem(state, inputs, params, hvp, key):
-    step_size = params["epsilon"]
-    z, m = jnp.split(state, 2)
-    if params["mass_diag"] is None:
-        mass_diag = jnp.ones((m.shape[0]))
-    else:
-        mass_diag = params["mass_diag"]
-    half_D = z.shape[0] 
-    diag11 = jnp.ones((1, half_D))
-    diag12 = step_size * jnp.ones((1, half_D)) / mass_diag[None, :]
-    z_rad = jr.rademacher(key, (z.shape)).astype(float)
-    hess_diag = z_rad * hvp(z+step_size*m/mass_diag, z_rad)
-    diag21 = step_size * hess_diag[None, :]
-    diag22 = jnp.ones((1, half_D)) + step_size**2 * hess_diag / mass_diag
-    out = jnp.vstack(( diag11, diag12, diag21, diag22 ))
-    return out
-"""
 def leapfrog_derivative_diag_blocks_mem(state, inputs, params, hvp, key):
     step_size = params["epsilon"]
     z, m = jnp.split(state, 2)
@@ -521,18 +454,3 @@ def leapfrog_derivative_diag_blocks_mem(state, inputs, params, hvp, key):
     diag22 = jnp.ones((1, half_D)) + step_size**2 * hess_diag / mass_diag
     out = jnp.vstack(( diag11, diag12, diag21, diag22 ))
     return out
-
-
-# def leapfrog_derivative_diag_blocks_mem(state, inputs, params, hvp, key):
-#     step_size = params["epsilon"]
-#     z, m = jnp.split(state, 2)
-#     mass_diag = params["mass_diag"]
-#     half_D = z.shape[0] 
-#     diag11 = jnp.ones((1, half_D))
-#     diag12 = step_size * jnp.ones((1, half_D)) / mass_diag[None, :]
-#     z_rad = jr.rademacher(key, (z.shape)).astype(float)
-#     hess_diag = z_rad * params["basis"].T @ hvp(z+step_size*m/mass_diag, params["basis"] @ z_rad)
-#     diag21 = step_size * hess_diag[None, :]
-#     diag22 = jnp.ones((1, half_D)) + step_size**2 * hess_diag / mass_diag
-#     out = jnp.vstack(( diag11, diag12, diag21, diag22 ))
-#     return out

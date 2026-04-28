@@ -3,16 +3,20 @@ jax.config.update("jax_default_matmul_precision", "highest")
 import jax.numpy as jnp
 import jax.random as jr
 
+from collections.abc import Callable
 from functools import partial
 
 # core DEER + QDEER algorithms
 import src
-from src import deer, qdeer, windowed_qdeer, elk
+from src import deer, windowed_qdeer, elk
 
 from tensorflow_probability.substrates import jax as tfp
 tfd = tfp.distributions
 
 def sigmoid_accept(x):
+    """
+    Differentiable relaxation of "0 if x < 0, 1 if x > 0".
+    """
     zero = jax.nn.sigmoid(x) - jax.lax.stop_gradient(jax.nn.sigmoid(x)) # zero on fwd pass.
     return zero + jax.lax.stop_gradient((x > 0)) 
 
@@ -93,10 +97,11 @@ class ParallelMALA:
             initial_state = params["basis"].T @ initial_state 
             yinit_guess = jnp.einsum('...ij, ...j -> ...i', params["basis"].T, yinit_guess)
 
-        out_states, iters = qdeer.seq1d(
-            self.mala_fn_for_deer, initial_state, drivers, params, 
+        out_states, iters = deer.seq1d(
+            self.mala_fn_for_deer, initial_state, drivers, params,
             yinit_guess=yinit_guess, max_iter=self.max_iter, clip_val=self.clip_val,
-            full_trace=self.full_trace, damp_factor=self.damp_factor
+            full_trace=self.full_trace, damp_factor=self.damp_factor,
+            quasi=True, qmem_efficient=True,
         )
 
         if self.basis_transformation:
@@ -135,23 +140,46 @@ class ParallelMALA:
 
 
 class ParallelHMC:
-    # our constructor
-    def __init__(self, log_prob, dim, chain_length, max_iter, alg="quasi",
-                 clip_val=1.0, damp_factor=1.0, full_trace=False, basis_transformation=False,
-                 show_progress=False, tol=None, rtol=None):
+
+    log_prob: Callable
+    D: int
+    chain_length: int
+    max_iter: int
+    alg: str
+    clip_val: float
+    damp_factor: float
+    full_trace: bool
+    basis_transformation: bool
+    show_progress: bool
+    tol: float | None
+    rtol: float | None
+    target_log_prob_and_grad: Callable
+
+    def __init__(self, log_prob: Callable, dim: int, chain_length: int, max_iter: int, alg: str = "quasi",
+                 clip_val: float = 1.0, damp_factor: float = 1.0, full_trace: bool = False, basis_transformation: bool = False,
+                 show_progress: bool = False, tol: float | None = None, rtol: float | None = None):
         '''
         Args:
-            logp - unnormalized log-posterior function that ONLY takes in theta as argument. Use partial.
-            dim - how many dimensions is our parameter space for sampling? (added together)
-            epsilon - the MALA stepsize.
-            quasi - are we taking diagonal or full Jacobian?
-            qmem_efficient - are we using the Hutchinson's estimator?
-            clip_val - what are we clipping individual gradient entries to in absolute value?
-            damp_factor - slightly damping the Jacobian.
-            tol - absolute tolerance for parallel DEER Newton early stop (None = dtype default in deer).
-            rtol - relative tolerance scale for the Newton residual (None = dtype default in deer).
+            log_prob           - unnormalized log-posterior callable; must accept only the position
+                                 vector as its argument (use functools.partial to fix other args).
+            dim                - dimensionality of the parameter space.
+            chain_length       - number of HMC steps (length of the Markov chain).
+            max_iter           - maximum number of DEER Newton iterations for the parallel solver.
+            alg                - DEER variant to use (default "quasi").
+            clip_val           - gradient entries are clipped to [-clip_val, clip_val] before the
+                                 Newton update (default 1.0).
+            damp_factor        - damping coefficient applied to the Jacobian in the Newton step
+                                 (default 1.0 = no damping).
+            full_trace         - if True, return the full per-iteration trace of parallel states
+                                 rather than only the converged chain (default False).
+            basis_transformation - unused in HMC; reserved for API parity with ParallelMALA.
+            show_progress      - if True, emit a progress callback via jax.debug during the
+                                 parallel solve (default False).
+            tol                - absolute residual tolerance for DEER early stopping
+                                 (None = dtype default in deer.seq1d).
+            rtol               - relative residual tolerance for DEER early stopping
+                                 (None = dtype default in deer.seq1d).
         '''
-        # 1. internalize + get the target log-prob and grad
         self.log_prob = log_prob
         self.D = dim
         self.chain_length = chain_length
@@ -180,30 +208,34 @@ class ParallelHMC:
 
     def hmc_fn_for_deer(self, state, driver, params):
         seed = driver
-        z = state 
+        position = state 
         step_size = params['epsilon'] 
-        m_seed, mh_seed = jax.random.split(seed)
-        tlp, tlp_grad = self.target_log_prob_and_grad(z)
-        m = jax.random.normal(m_seed, z.shape)
-        energy = 0.5 * jnp.square(m).sum() - tlp
-        # start with half-step of momentum
-        m += 0.5 * step_size * tlp_grad
-        init_state = jnp.concatenate((z, m))
+        momentum_seed, mh_seed = jax.random.split(seed)
+        tlp, tlp_grad = self.target_log_prob_and_grad(position)
+        momentum = jax.random.normal(momentum_seed, position.shape)
+        energy = 0.5 * jnp.square(momentum).sum() - tlp
+
+        # Initial half-step of momentum
+        momentum += 0.5 * step_size * tlp_grad
+
+        init_state = jnp.concatenate((position, momentum))
         new_state = jax.lax.fori_loop(0, params['num_leapfrog_steps'],
             lambda i, state : self.scan_leapfrog(state, step_size), 
             init_state)
-        new_z, new_m = jnp.split(new_state, 2)
-        new_tlp, new_tlp_grad = self.target_log_prob_and_grad(new_z)
-        # end with backward half-step of momentum
-        new_m -= 0.5 * step_size * new_tlp_grad 
-        new_energy = 0.5 * jnp.square(new_m).sum() - new_tlp
+        new_position, new_momentum = jnp.split(new_state, 2)
+        new_tlp, new_tlp_grad = self.target_log_prob_and_grad(new_position)
+
+        # Final backward half-step of momentum
+        new_momentum -= 0.5 * step_size * new_tlp_grad 
+
+        new_energy = 0.5 * jnp.square(new_momentum).sum() - new_tlp
         log_accept_ratio = energy - new_energy
 
         # accept-reject
         u = jax.random.uniform(mh_seed, [])
         g = sigmoid_accept(log_accept_ratio-jnp.log(u))
-        z = g*new_z + (1.0-g)*z
-        return z
+        new_position = g*new_position + (1.0-g)*position
+        return new_position
 
     def run_sequential_hmc(self, key, initial_state, params):
 

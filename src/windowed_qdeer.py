@@ -6,7 +6,7 @@ Licensed under the BSD 3-Clause License (see LICENSE file for details).
 
 Modifications for benchmarking and quasi-DEER by Xavier Gonzalez (2024). """
 
-from typing import Callable, Any, Tuple, List, Optional
+from typing import Callable, Any, Tuple, Optional
 
 import jax
 import jax.numpy as jnp
@@ -48,7 +48,6 @@ def seq1d(
         func=func2,
         shifter_func=shifter_func,
         dyn_func=func2,
-        p_num=1,
         params=params,
         xinput=xinp,
         y0=y0,
@@ -150,11 +149,10 @@ def set_after_index_2d(arr, t, value):
     return jnp.where(mask, value, arr)
 
 def diagonal_deer_iteration_helper(
-    inv_lin: Callable[[List[jnp.ndarray], jnp.ndarray, Any], jnp.ndarray],
-    func: Callable[[List[jnp.ndarray], Any, Any], jnp.ndarray],
-    shifter_func: Callable[[jnp.ndarray, Any], List[jnp.ndarray]],
+    inv_lin: Callable[[jnp.ndarray, jnp.ndarray, Any], jnp.ndarray],
+    func: Callable[[jnp.ndarray, Any, Any], jnp.ndarray],
+    shifter_func: Callable[[jnp.ndarray, Any], jnp.ndarray],
     dyn_func: Callable[[jnp.ndarray, Any, Any], jnp.ndarray],
-    p_num: int,
     params: Any,  # gradable
     xinput: Any,  # gradable
     y0: jnp.ndarray,
@@ -166,7 +164,7 @@ def diagonal_deer_iteration_helper(
     damp_factor: float=1.0, # Damping 
     preconditioner: Any=None, # Diagonal preconditioner
     clip_val: float=1e8,
-) -> Tuple[jnp.ndarray, Optional[List[jnp.ndarray]], Callable]:
+) -> Tuple[jnp.ndarray, Optional[jnp.ndarray], Callable]:
 
     precond = preconditioner if preconditioner is not None else jnp.ones((yinit_guess.shape[-1]))
     keys = jr.split(params['key'], (window))
@@ -182,8 +180,8 @@ def diagonal_deer_iteration_helper(
     rtol = 1e-4 if dtype == jnp.float64 else 1e-3
 
     def iter_func(
-        iter_inp: Tuple[jnp.ndarray, jnp.ndarray, List[jnp.ndarray], jnp.ndarray]
-    ) -> Tuple[jnp.ndarray, jnp.ndarray, List[jnp.ndarray], jnp.ndarray]:
+        iter_inp: Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]
+    ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
         t, yt, y_init, iiter = iter_inp # orig
 
         t = jnp.minimum(t, T-window)
@@ -265,7 +263,7 @@ def diagonal_deer_iteration_helper(
         return new_carry, yt
 
     def cond_func(
-        iter_inp: Tuple[jnp.ndarray, jnp.ndarray, List[jnp.ndarray], jnp.ndarray]
+        iter_inp: Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]
     ) -> bool:
         t, _, _, iiter = iter_inp
         return jnp.logical_and(t < T, iiter < max_iter)

@@ -18,7 +18,7 @@ PLOT_DIR.mkdir(parents=True, exist_ok=True)
 # tqdm + jax.debug.callback only when this file is executed (not on import).
 _SHOW_DEER_PROGRESS = __name__ == "__main__"
 
-target = gym.targets.VectorModel(gym.targets.Banana(),
+target = gym.targets.VectorModel(gym.targets.Banana(curvature=0.05),
                                  flatten_sample_transformations=True)
 D = target.event_shape[0]
 

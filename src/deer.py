@@ -6,7 +6,7 @@ Licensed under the BSD 3-Clause License (see LICENSE file for details).
 
 Modifications for benchmarking and quasi-DEER by Xavier Gonzalez (2024). """
 
-from typing import Callable, Any, Tuple, List, Optional
+from typing import Callable, Any, Tuple, Optional
 
 import jax
 import jax.numpy as jnp
@@ -115,24 +115,17 @@ def seq1d(
             (xinp_flat.shape[0], y0.shape[-1]), dtype=xinp_flat.dtype
         )  # (nsamples, ny)
 
-    def func2(ylist: List[jnp.ndarray], x: Any, params: Any) -> jnp.ndarray:
-        # ylist: (ny,)
-        return func(ylist[0], x, params)
-
-    def shifter_func(y: jnp.ndarray, shifter_params: Any) -> List[jnp.ndarray]:
+    def shifter_func(y: jnp.ndarray, shifter_params: Any) -> jnp.ndarray:
         # y: (nsamples, ny)
-        # shifter_params = (y0,)
         (y0,) = shifter_params
         y = jnp.concatenate((y0[None, :], y[:-1, :]), axis=0)  # (nsamples, ny)
-        return [y]
+        return y
 
     # perform the deer iteration
     if quasi:
         yt, samp_iters = deer_iteration(
             inv_lin=diagonal_seq1d_inv_lin,
-            p_num=1,
-            func=func2,
-            dyn_func=func,
+            func=func,
             shifter_func=shifter_func,
             params=params,
             xinput=xinp,
@@ -155,9 +148,7 @@ def seq1d(
     else:
         yt, samp_iters = deer_iteration(
             inv_lin=seq1d_inv_lin,
-            p_num=1,
-            func=func2,
-            dyn_func=func,
+            func=func,
             shifter_func=shifter_func,
             params=params,
             xinput=xinp,
@@ -183,14 +174,10 @@ def seq1d(
         return (yt, samp_iters)
 
 
-#@partial(jax.custom_vjp, nondiff_argnums=(0, 1, 2, 3, 9, 10, 11, 12, 13, 14))
-
 def deer_iteration(
-    inv_lin: Callable[[List[jnp.ndarray], jnp.ndarray, Any], jnp.ndarray],
-    func: Callable[[List[jnp.ndarray], Any, Any], jnp.ndarray],
-    shifter_func: Callable[[jnp.ndarray], List[jnp.ndarray]],
-    dyn_func: Callable[[jnp.ndarray, Any, Any], jnp.ndarray],
-    p_num: int,
+    inv_lin: Callable[[jnp.ndarray, jnp.ndarray, Any], jnp.ndarray],
+    func: Callable[[jnp.ndarray, Any, Any], jnp.ndarray],
+    shifter_func: Callable[[jnp.ndarray, Any], jnp.ndarray],
     params: Any,  # gradable
     xinput: Any,  # gradable
     inv_lin_params: Any,  # gradable
@@ -214,25 +201,21 @@ def deer_iteration(
 
     Arguments
     ---------
-    inv_lin: Callable[[List[jnp.ndarray], jnp.ndarray, Any], jnp.ndarray]
+    inv_lin: Callable[[jnp.ndarray, jnp.ndarray, Any], jnp.ndarray]
         Inverse of the linear operator.
-        Takes the list of G-matrix (nsamples, ny, ny) (p-elements, in this case p=1),
+        Takes the G-matrix (nsamples, ny, ny) [or (nsamples, ny) for diagonal variant],
         the right hand side of the equation (nsamples, ny), and the inv_lin parameters in a tree.
         Returns the results of the inverse linear operator (nsamples, ny).
-    func: Callable[[List[jnp.ndarray], Any, Any], jnp.ndarray]
-        The non-linear function.
-        Function that takes the list of y [output: (ny,)] (p elements), x [input: (*nx)] (in a pytree),
-        and parameters (any structure of pytree).
-        Returns the output of the function.
-    shifter_func: Callable[[jnp.ndarray, Any], List[jnp.ndarray]]
-        The function that shifts the input signal.
-        It takes the signal of shape (nsamples, ny) and produces a list of shifted signals of shape (nsamples, ny).
-    p_num: int
-        Number of previous values in the recursion y_t+1 = func(y_t, x_t, params) the function takes as inputs
+    func: Callable[[jnp.ndarray, Any, Any], jnp.ndarray]
+        The non-linear Markov transition f(y, x, params) -> y_next.
+        Takes output signal y (ny,), input signal x (*nx,) in a pytree, and parameters.
+        Returns the next output signal (ny,).
+    shifter_func: Callable[[jnp.ndarray, Any], jnp.ndarray]
+        Shifts the current iterate: takes (nsamples, ny) -> (nsamples, ny).
     params: Any
         The parameters of the function ``func``.
     xinput: Any
-        The exogenous input signal x to the recursion y_t+1 = func(y_t, x_t, params) in a pytree with shape (nsamples, *nx).
+        The exogenous input signal in a pytree with shape (nsamples, *nx).
         For MCMC, these are just rng values.
     inv_lin_params: tree structure of jnp.ndarray
         The parameters of the function ``inv_lin``.
@@ -240,7 +223,6 @@ def deer_iteration(
         The parameters of the function ``shifter_func``.
     yinit_guess: jnp.ndarray or None
         The initial guess of the output signal (nsamples, ny).
-        If None, it will be initialized as 0s.
     max_iter: int
         The maximum number of iterations to perform.
     memory_efficient: bool
@@ -267,8 +249,6 @@ def deer_iteration(
             inv_lin=inv_lin,
             func=func,
             shifter_func=shifter_func,
-            dyn_func=dyn_func,
-            p_num=p_num,
             params=params,
             xinput=xinput,
             inv_lin_params=inv_lin_params,
@@ -292,7 +272,6 @@ def deer_iteration(
             inv_lin=inv_lin,
             func=func,
             shifter_func=shifter_func,
-            p_num=p_num,
             params=params,
             xinput=xinput,
             inv_lin_params=inv_lin_params,
@@ -313,10 +292,9 @@ def deer_iteration(
 
 
 def deer_iteration_helper(
-    inv_lin: Callable[[List[jnp.ndarray], jnp.ndarray, Any], jnp.ndarray],
-    func: Callable[[List[jnp.ndarray], Any, Any], jnp.ndarray],
-    shifter_func: Callable[[jnp.ndarray, Any], List[jnp.ndarray]],
-    p_num: int,
+    inv_lin: Callable[[jnp.ndarray, jnp.ndarray, Any], jnp.ndarray],
+    func: Callable[[jnp.ndarray, Any, Any], jnp.ndarray],
+    shifter_func: Callable[[jnp.ndarray, Any], jnp.ndarray],
     params: Any,  # gradable
     xinput: Any,  # gradable
     inv_lin_params: Any,  # gradable
@@ -332,7 +310,7 @@ def deer_iteration_helper(
     show_progress: bool = False,
     tol: Optional[float] = None,
     rtol: Optional[float] = None,
-) -> Tuple[jnp.ndarray, Optional[List[jnp.ndarray]], Callable]:
+) -> Tuple[jnp.ndarray, Optional[jnp.ndarray], Callable]:
     """
     Notes:
         - XG addition: full_trace, to return all the intermediate y values (up to length max_iter)
@@ -344,34 +322,26 @@ def deer_iteration_helper(
             max_iter, "DEER seq1d Newton"
         )
 
-    # obtain the functions to compute the jacobians and the function
     jacfunc = jax.vmap(jax.jacfwd(func, argnums=0), in_axes=(0, 0, None))
     func2 = jax.vmap(func, in_axes=(0, 0, None))
 
     dtype = yinit_guess.dtype
-    # set the tolerance to be 1e-4 if dtype is float32, else 1e-7 for float64
     default_tol = 1e-7 if dtype == jnp.float64 else 1e-4
     default_rtol = 1e-4 if dtype == jnp.float64 else 1e-3
     tol_effective = default_tol if tol is None else tol
     rtol_effective = default_rtol if rtol is None else rtol
 
-    # use the iter function if doing early stopping
     def iter_func(
-        iter_inp: Tuple[jnp.ndarray, jnp.ndarray, List[jnp.ndarray], jnp.ndarray]
-    ) -> Tuple[jnp.ndarray, jnp.ndarray, List[jnp.ndarray], jnp.ndarray]:
+        iter_inp: Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]
+    ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
         err, yt, gt_, iiter = iter_inp
-        # gt_ is not used, but it is needed to return at the end of scan iteration
         # yt: (nsamples, ny)
         ytparams = shifter_func(yt, shifter_func_params)
-        gts = [
-            -jnp.clip(damp_factor*gt, -clip_val, clip_val) for gt in jacfunc(ytparams, xinput, params)
-        ]  # [p_num] + (nsamples, ny, ny), meaning its a list of length p num
+        gt = -jnp.clip(damp_factor * jacfunc(ytparams, xinput, params), -clip_val, clip_val)
         # rhs: (nsamples, ny)
-        rhs = func2(ytparams, xinput, params)  # (carry, input, params) 
-        rhs += sum(
-            [jnp.einsum("...ij,...j->...i", gt, ytp) for gt, ytp in zip(gts, ytparams)]
-        )
-        yt_next = inv_lin(gts, rhs, inv_lin_params)  # (nsamples, ny)
+        rhs = func2(ytparams, xinput, params)
+        rhs += jnp.einsum("...ij,...j->...i", gt, ytparams)
+        yt_next = inv_lin(gt, rhs, inv_lin_params)  # (nsamples, ny)
 
         if clip_ytnext:
             clip = 1e8
@@ -383,33 +353,26 @@ def deer_iteration_helper(
         next_iiter = iiter + 1
         if progress_cb is not None:
             jax.debug.callback(progress_cb, next_iiter, ordered=True)
-        return err, yt_next, gts, next_iiter
+        return err, yt_next, gt, next_iiter
 
-    # use the scan function to get the full trace
     def scan_func(iter_inp, args):
         err, yt, gt_, iiter = iter_inp
-        # gt_ is not used, but it is needed to return at the end of scan iteration
         # yt: (nsamples, ny)
         ytparams = shifter_func(yt, shifter_func_params)
-        gts = [
-            -jnp.clip(damp_factor*gt, -clip_val, clip_val) for gt in jacfunc(ytparams, xinput, params)
-        ]  # [p_num] + (nsamples, ny, ny), meaning its a list of length p num
+        gt = -jnp.clip(damp_factor * jacfunc(ytparams, xinput, params), -clip_val, clip_val)
         # rhs: (nsamples, ny)
-        rhs = func2(ytparams, xinput, params)  # (carry, input, params)
-        rhs += sum(
-            [jnp.einsum("...ij,...j->...i", gt, ytp) for gt, ytp in zip(gts, ytparams)]
-        )
-        yt_next = inv_lin(gts, rhs, inv_lin_params)  # (nsamples, ny)
+        rhs = func2(ytparams, xinput, params)
+        rhs += jnp.einsum("...ij,...j->...i", gt, ytparams)
+        yt_next = inv_lin(gt, rhs, inv_lin_params)  # (nsamples, ny)
 
-        # err = jnp.max(jnp.abs(yt_next - yt))  # checking convergence
         err = jnp.max( jnp.abs(yt_next - yt) - rtol_effective * jnp.abs(yt) )
 
         yt_next = jnp.nan_to_num(yt_next)  # XG addition, avoid nans
-        new_carry = err, yt_next, gts, iiter + 1
+        new_carry = err, yt_next, gt, iiter + 1
         return new_carry, yt_next
 
     def cond_func(
-        iter_inp: Tuple[jnp.ndarray, jnp.ndarray, List[jnp.ndarray], jnp.ndarray]
+        iter_inp: Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]
     ) -> bool:
         err, _, _, iiter = iter_inp
         return jnp.logical_and(err > tol_effective, iiter < max_iter)
@@ -419,25 +382,23 @@ def deer_iteration_helper(
         (yinit_guess.shape[0], yinit_guess.shape[-1], yinit_guess.shape[-1]),
         dtype=dtype,
     )
-    gts = [gt] * p_num
 
     iiter = jnp.array(0, dtype=jnp.int32)
-    # decide whether to record full trace or not
     if full_trace:
         _, yt = jax.lax.scan(
-            scan_func, (err, yinit_guess, gts, iiter), None, length=max_iter
+            scan_func, (err, yinit_guess, gt, iiter), None, length=max_iter
         )
         samp_iters = max_iter
     else:
-        _, yt, gts, samp_iters = jax.lax.while_loop(
-            cond_func, iter_func, (err, yinit_guess, gts, iiter)
+        _, yt, gt, samp_iters = jax.lax.while_loop(
+            cond_func, iter_func, (err, yinit_guess, gt, iiter)
         )
     if progress_close is not None:
         jax.debug.callback(progress_close, samp_iters, ordered=True)
     if memory_efficient:
-        gts = None
-    rhs = jnp.zeros_like(gts[0][..., 0])  # (nsamples, ny)
-    return yt, gts, rhs, func, samp_iters
+        gt = None
+    rhs = jnp.zeros_like(gt[..., 0])  # (nsamples, ny)
+    return yt, gt, rhs, func, samp_iters
 
 
 def binary_operator(
@@ -489,7 +450,7 @@ def matmul_recursive(
 
 
 def seq1d_inv_lin(
-    gmat: List[jnp.ndarray], rhs: jnp.ndarray, inv_lin_params: Tuple[jnp.ndarray]
+    gmat: jnp.ndarray, rhs: jnp.ndarray, inv_lin_params: Tuple[jnp.ndarray]
 ) -> jnp.ndarray:
     """
     Inverse of the linear operator for solving the discrete sequential equation.
@@ -498,7 +459,7 @@ def seq1d_inv_lin(
     Arguments
     ---------
     gmat: jnp.ndarray
-        The list of 1 G-matrix of shape (nsamples, ny, ny).
+        The G-matrix of shape (nsamples, ny, ny).
     rhs: jnp.ndarray
         The right hand side of the equation of shape (nsamples, ny).
     inv_lin_params: Tuple[jnp.ndarray]
@@ -510,9 +471,7 @@ def seq1d_inv_lin(
     y: jnp.ndarray
         The solution of the linear equation of shape (nsamples, ny).
     """
-    # extract the parameters
     (y0,) = inv_lin_params
-    gmat = gmat[0]
 
     # compute the recursive matrix multiplication and drop the first element
     yt = matmul_recursive(-gmat, rhs, y0)[1:]  # (nsamples, ny)
@@ -573,7 +532,7 @@ def diagonal_matmul_recursive(
 
 
 def diagonal_seq1d_inv_lin(
-    gmat: List[jnp.ndarray], rhs: jnp.ndarray, inv_lin_params: Tuple[jnp.ndarray]
+    gmat: jnp.ndarray, rhs: jnp.ndarray, inv_lin_params: Tuple[jnp.ndarray]
 ) -> jnp.ndarray:
     """
     Inverse of the linear operator for solving the discrete sequential equation.
@@ -582,7 +541,7 @@ def diagonal_seq1d_inv_lin(
     Arguments
     ---------
     gmat: jnp.ndarray
-        The list of 1 G-matrix of shape (nsamples, ny). NOTE: these G-matrices must be diagonal (XG addition)
+        The diagonal G-matrix of shape (nsamples, ny). (XG addition)
     rhs: jnp.ndarray
         The right hand side of the equation of shape (nsamples, ny).
     inv_lin_params: Tuple[jnp.ndarray]
@@ -594,9 +553,7 @@ def diagonal_seq1d_inv_lin(
     y: jnp.ndarray
         The solution of the linear equation of shape (nsamples, ny).
     """
-    # extract the parameters
     (y0,) = inv_lin_params
-    gmat = gmat[0]
 
     # compute the recursive matrix multiplication and drop the first element
     yt = diagonal_matmul_recursive(-gmat, rhs, y0)[1:]  # (nsamples, ny)
@@ -604,11 +561,9 @@ def diagonal_seq1d_inv_lin(
 
 
 def diagonal_deer_iteration_helper(
-    inv_lin: Callable[[List[jnp.ndarray], jnp.ndarray, Any], jnp.ndarray],
-    func: Callable[[List[jnp.ndarray], Any, Any], jnp.ndarray],
-    shifter_func: Callable[[jnp.ndarray, Any], List[jnp.ndarray]],
-    dyn_func: Callable[[jnp.ndarray, Any, Any], jnp.ndarray],
-    p_num: int,
+    inv_lin: Callable[[jnp.ndarray, jnp.ndarray, Any], jnp.ndarray],
+    func: Callable[[jnp.ndarray, Any, Any], jnp.ndarray],
+    shifter_func: Callable[[jnp.ndarray, Any], jnp.ndarray],
     params: Any,  # gradable
     xinput: Any,  # gradable
     inv_lin_params: Any,  # gradable
@@ -625,7 +580,7 @@ def diagonal_deer_iteration_helper(
     show_progress: bool = False,
     tol: Optional[float] = None,
     rtol: Optional[float] = None,
-) -> Tuple[jnp.ndarray, Optional[List[jnp.ndarray]], Callable]:
+) -> Tuple[jnp.ndarray, Optional[jnp.ndarray], Callable]:
     progress_cb = None
     progress_close = None
     if show_progress and not full_trace:
@@ -633,7 +588,6 @@ def diagonal_deer_iteration_helper(
             max_iter, "DEER seq1d Newton (quasi)"
         )
 
-    # obtain the functions to compute the jacobians and the function
     jacfunc = jax.vmap(
         jax.jacfwd(func, argnums=0), in_axes=(0, 0, None)
     )  # bunch of dense matrices
@@ -642,96 +596,79 @@ def diagonal_deer_iteration_helper(
 
     if qmem_efficient:
         def deer_jvp(z, driver, params, v):
-            return jax.jvp(lambda z : dyn_func(z, driver, params), (z,), (v, ))[1]
+            return jax.jvp(lambda z : func(z, driver, params), (z,), (v, ))[1]
         keys = jr.split(params['key'], (xinput.shape[0]))
 
     func2 = jax.vmap(func, in_axes=(0, 0, None))
 
     dtype = yinit_guess.dtype
-    # set the tolerance to be 5e-4 if dtype is float32, else 1e-7 for float64
     default_tol = 1e-7 if dtype == jnp.float64 else 5e-4
     default_rtol = 1e-4 if dtype == jnp.float64 else 1e-3
     tol_effective = default_tol if tol is None else tol
     rtol_effective = default_rtol if rtol is None else rtol
 
     def iter_func(
-        iter_inp: Tuple[jnp.ndarray, jnp.ndarray, List[jnp.ndarray], jnp.ndarray]
-    ) -> Tuple[jnp.ndarray, jnp.ndarray, List[jnp.ndarray], jnp.ndarray]:
+        iter_inp: Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]
+    ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
         err, yt, gt_, iiter = iter_inp
-        # gt_ is not used, but it is needed to return at the end of scan iteration
         # yt: (nsamples, ny)
         ytparams = shifter_func(yt, shifter_func_params)
-        # XG change to be more memory efficient
         if qmem_efficient:
-            gts = [
-               -jnp.clip(damp_factor / precond[None,:] *jax.vmap(quasi_diag_estimator, in_axes=(0, 0, None, None, 0))(
-                   ytparams[0], xinput, params, deer_jvp, keys), -clip_val, clip_val)
-            ]
+            gt = -jnp.clip(
+                damp_factor / precond[None,:] * jax.vmap(quasi_diag_estimator, in_axes=(0, 0, None, None, 0))(
+                    ytparams, xinput, params, deer_jvp, keys),
+                -clip_val, clip_val,
+            )
         else:
-            gts = [
-                -jnp.clip(damp_factor / precond[None,:] * jax.vmap(jnp.diag)(gt), -clip_val, clip_val)
-                for gt in jacfunc(
-                    ytparams, xinput, params
-                )  # adjusted to deal with scalars
-            ]  # [p_num] + (nsamples, ny)
+            gt = -jnp.clip(
+                damp_factor / precond[None,:] * jax.vmap(jnp.diag)(jacfunc(ytparams, xinput, params)),
+                -clip_val, clip_val,
+            )
         # rhs: (nsamples, ny)
-        rhs = func2(ytparams, xinput, params)  # (carry, input, params) 
-        rhs += sum(
-            [
-                gt * ytp for gt, ytp in zip(gts, ytparams)
-            ]  # adjusted to deal with scalars
-        )
-        yt_next = inv_lin(gts, rhs, inv_lin_params)  # (nsamples, ny)
+        rhs = func2(ytparams, xinput, params)
+        rhs += gt * ytparams
+        yt_next = inv_lin(gt, rhs, inv_lin_params)  # (nsamples, ny)
 
         if clip_ytnext:
             clip = 1e8
             yt_next = jnp.clip(yt_next, a_min=-clip, a_max=clip)
             yt_next = jnp.where(jnp.isnan(yt_next), 0.0, yt_next)
 
-        # err = jnp.max(jnp.abs(yt_next - yt))  # checking convergence
-        # relative tolerance
         err = jnp.max( jnp.abs(yt_next - yt) - rtol_effective * jnp.abs(yt) )
 
         next_iiter = iiter + 1
         if progress_cb is not None:
             jax.debug.callback(progress_cb, next_iiter, ordered=True)
-        return err, yt_next, gts, next_iiter
+        return err, yt_next, gt, next_iiter
 
     def scan_func(iter_inp, args):
         err, yt, gt_, iiter = iter_inp
-        # gt_ is not used, but it is needed to return at the end of scan iteration
         # yt: (nsamples, ny)
         ytparams = shifter_func(yt, shifter_func_params)
         if qmem_efficient:
-            gts = [
-               -jnp.clip(damp_factor / precond[None,:] *jax.vmap(quasi_diag_estimator, in_axes=(0, 0, None, None, 0))(
-                   ytparams[0], xinput, params, deer_jvp, keys), -clip_val, clip_val)
-            ]
+            gt = -jnp.clip(
+                damp_factor / precond[None,:] * jax.vmap(quasi_diag_estimator, in_axes=(0, 0, None, None, 0))(
+                    ytparams, xinput, params, deer_jvp, keys),
+                -clip_val, clip_val,
+            )
         else:
-            gts = [
-                -jnp.clip(damp_factor / precond[None,:] * jax.vmap(jnp.diag)(gt), -clip_val, clip_val)
-                for gt in jacfunc(
-                    ytparams, xinput, params
-                )  # adjusted to deal with scalars
-            ]  # [p_num] + (nsamples, ny)
+            gt = -jnp.clip(
+                damp_factor / precond[None,:] * jax.vmap(jnp.diag)(jacfunc(ytparams, xinput, params)),
+                -clip_val, clip_val,
+            )
         # rhs: (nsamples, ny)
-        rhs = func2(ytparams, xinput, params)  # (carry, input, params) 
-        rhs += sum(
-            [
-                gt * ytp for gt, ytp in zip(gts, ytparams)
-            ]  # adjusted to deal with scalars
-        )
-        yt_next = inv_lin(gts, rhs, inv_lin_params)  # (nsamples, ny)
+        rhs = func2(ytparams, xinput, params)
+        rhs += gt * ytparams
+        yt_next = inv_lin(gt, rhs, inv_lin_params)  # (nsamples, ny)
 
-        # err = jnp.max(jnp.abs(yt_next - yt))  # checking convergence
         err = jnp.max( jnp.abs(yt_next - yt) - rtol_effective * jnp.abs(yt) )
 
         yt_next = jnp.nan_to_num(yt_next)  # XG addition, avoid nans
-        new_carry = err, yt_next, gts, iiter + 1
+        new_carry = err, yt_next, gt, iiter + 1
         return new_carry, yt_next
 
     def cond_func(
-        iter_inp: Tuple[jnp.ndarray, jnp.ndarray, List[jnp.ndarray], jnp.ndarray]
+        iter_inp: Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]
     ) -> bool:
         err, _, _, iiter = iter_inp
         return jnp.logical_and(err > tol_effective, iiter < max_iter)
@@ -741,24 +678,22 @@ def diagonal_deer_iteration_helper(
         (yinit_guess.shape[0], yinit_guess.shape[-1]),
         dtype=dtype,
     )
-    gts = [gt] * p_num
     iiter = jnp.array(0, dtype=jnp.int32)
-    # decide whether to record full trace or not
     if full_trace:
         _, yt = jax.lax.scan(
-            scan_func, (err, yinit_guess, gts, iiter), None, length=max_iter
+            scan_func, (err, yinit_guess, gt, iiter), None, length=max_iter
         )
         samp_iters = max_iter
     else:
-        _, yt, gts, samp_iters = jax.lax.while_loop(
-            cond_func, iter_func, (err, yinit_guess, gts, iiter)
+        _, yt, gt, samp_iters = jax.lax.while_loop(
+            cond_func, iter_func, (err, yinit_guess, gt, iiter)
         )
     if progress_close is not None:
         jax.debug.callback(progress_close, samp_iters, ordered=True)
     if memory_efficient:
-        gts = None
-    rhs = jnp.zeros_like(gts[0])  # (nsamples, ny)
-    return yt, gts, rhs, func, samp_iters
+        gt = None
+    rhs = jnp.zeros_like(gt)  # (nsamples, ny)
+    return yt, gt, rhs, func, samp_iters
 
 def quasi_diag_estimator(state, inputs, params, deer_jvp, key, num_samples=1):
     z_rad = jr.rademacher(key, (num_samples, state.shape[0])).astype(float)
