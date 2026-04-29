@@ -1,3 +1,4 @@
 *.pyc
 parallel_mcmc.egg-info/
 examples/plots/
+sandbox.ipynb
