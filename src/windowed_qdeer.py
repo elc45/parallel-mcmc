@@ -6,7 +6,7 @@ Licensed under the BSD 3-Clause License (see LICENSE file for details).
 
 Modifications for benchmarking and quasi-DEER by Xavier Gonzalez (2024). """
 
-from typing import Callable, Any, Tuple, Optional
+from typing import Callable, Any, Tuple, Optional, List
 
 import jax
 import jax.numpy as jnp

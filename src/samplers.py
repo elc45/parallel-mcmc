@@ -16,7 +16,62 @@ def sigmoid_accept(x):
     Differentiable relaxation of "0 if x < 0, 1 if x > 0".
     """
     zero = jax.nn.sigmoid(x) - jax.lax.stop_gradient(jax.nn.sigmoid(x)) # zero on fwd pass.
-    return zero + jax.lax.stop_gradient((x > 0)) 
+    return zero + jax.lax.stop_gradient((x > 0))
+
+
+def _packed_state_dim(D: int) -> int:
+    """Position (D) + count (1) + mean (D) + Welford M2 per coord (D)."""
+    return 3 * D + 1
+
+
+def _unpack_adaptive_state(packed: jnp.ndarray, D: int):
+    position = packed[:D]
+    count = packed[D]
+    mean = packed[D + 1 : 2 * D + 1]
+    m2_diag = packed[2 * D + 1 :]
+    return position, count, mean, m2_diag
+
+
+def _pack_adaptive_state(position, count, mean, m2_diag):
+    return jnp.concatenate([position, count[None], mean, m2_diag])
+
+
+def _welford_update_diag(
+    count: jnp.ndarray,
+    mean: jnp.ndarray,
+    m2_diag: jnp.ndarray,
+    x: jnp.ndarray,
+):
+    """Online variance accumulators per coordinate; returns (count_new, mean_new, m2_diag_new)."""
+    n_new = count + 1.0
+    delta = x - mean
+    mean_new = mean + delta / n_new
+    m2_new = m2_diag + delta * (x - mean_new)
+    return n_new, mean_new, m2_new
+
+
+def _variance_diag_from_welford(count: jnp.ndarray, m2_diag: jnp.ndarray) -> jnp.ndarray:
+    """Unbiased sample variance per coord when count > 1; else zero."""
+    return jnp.where(
+        count > 1.0,
+        m2_diag / jnp.maximum(count - 1.0, 1.0),
+        jnp.zeros_like(m2_diag),
+    )
+
+
+def _mass_diag_identity_regularized(variance_diag: jnp.ndarray, lam: float) -> jnp.ndarray:
+    """Diagonal mass M = diag(var_hat) + λ I, i.e. M_ii = variance_i + λ."""
+    return variance_diag + lam
+
+
+def _sample_momentum_diag_mass(mass_diag: jnp.ndarray, key, shape):
+    """Sample p ~ N(0, diag(mass))."""
+    return jnp.sqrt(mass_diag) * jr.normal(key, shape)
+
+
+def _kinetic_diag_mass(p: jnp.ndarray, mass_diag: jnp.ndarray) -> jnp.ndarray:
+    """K = 1/2 sum_i p_i^2 / M_ii for diagonal mass M."""
+    return 0.5 * jnp.sum((p**2) / mass_diag)
 
 class ParallelMALA:
     
@@ -151,6 +206,9 @@ class ParallelHMC:
     show_progress: bool
     tol: float | None
     rtol: float | None
+    adaptive_mass: bool
+    cov_jitter: float
+    chain_state_dim: int
     target_log_prob_and_grad: Callable
 
     def __init__(self, 
@@ -166,7 +224,9 @@ class ParallelHMC:
                 basis_transformation: bool = False,
                 show_progress: bool = False, 
                 tol: float | None = None, 
-                rtol: float | None = None):
+                rtol: float | None = None,
+                adaptive_mass: bool = False,
+                cov_jitter: float = 1.0):
         '''
         Args:
             log_prob           - unnormalized log-posterior callable; must accept only the position
@@ -190,6 +250,11 @@ class ParallelHMC:
                                  (None = dtype default in deer.seq1d).
             rtol               - relative residual tolerance for DEER early stopping
                                  (None = dtype default in deer.seq1d).
+            adaptive_mass      - if True, carry per-coordinate Welford variance estimates and use
+                                 diagonal mass M = diag(var_hat) + cov_jitter * I within each
+                                 trajectory. Packed chain state has dim 3D+1.
+            cov_jitter         - λ in diag(var_hat) + λ I (regularizes toward scaled identity when
+                                 empirical variance is tiny; default 1.0 matches unit-mass scale).
         '''
         self.log_prob = log_prob
         self.D = dim
@@ -205,6 +270,9 @@ class ParallelHMC:
         self.show_progress = show_progress
         self.tol = tol
         self.rtol = rtol
+        self.adaptive_mass = adaptive_mass
+        self.cov_jitter = cov_jitter
+        self.chain_state_dim = _packed_state_dim(dim) if adaptive_mass else dim
 
     def scan_leapfrog(self, state, step_size):
         # Assumes you start and end 
@@ -218,7 +286,77 @@ class ParallelHMC:
         next_state = jnp.concatenate((z, m))
         return next_state
 
+    def _scan_leapfrog_diag_mass(self, state: jnp.ndarray, step_size, mass_diag: jnp.ndarray):
+        """Leapfrog with diagonal mass M: dq/dt = M^{-1} p => q += eps * (p / mass_diag)."""
+        z, m = jnp.split(state, 2)
+        z = z + step_size * (m / mass_diag)
+        _, tlp_grad = self.target_log_prob_and_grad(z)
+        m = m + step_size * tlp_grad
+        return jnp.concatenate((z, m))
+
+    def _initial_packed_state(self, position: jnp.ndarray) -> jnp.ndarray:
+        D = self.D
+        dtype = position.dtype
+        return _pack_adaptive_state(
+            position,
+            jnp.array(0.0, dtype=dtype),
+            jnp.zeros((D,), dtype=dtype),
+            jnp.zeros((D,), dtype=dtype),
+        )
+
+    def _expand_yinit_to_packed(self, y_positions: jnp.ndarray) -> jnp.ndarray:
+        """Expand (T, D) trajectory guess to (T, chain_state_dim) with zero Welford slots."""
+        T, D = y_positions.shape
+        tail = jnp.zeros((T, self.chain_state_dim - D), dtype=y_positions.dtype)
+        return jnp.concatenate([y_positions, tail], axis=-1)
+
+    def _positions_only(self, states: jnp.ndarray) -> jnp.ndarray:
+        """Take leading D dims when adaptive; pass-through shape-safe when not."""
+        return states[..., : self.D]
+
+    def _hmc_adaptive_packed(self, packed_state: jnp.ndarray, driver, params):
+        """One HMC step with M = diag(var_hat) + λ I (fixed within trajectory)."""
+        D = self.D
+        step_size = params["epsilon"]
+        num_steps = params["num_leapfrog_steps"]
+        seed = driver
+
+        position, count, mean, m2_diag = _unpack_adaptive_state(packed_state, D)
+        variance_diag = _variance_diag_from_welford(count, m2_diag)
+        mass_diag = _mass_diag_identity_regularized(variance_diag, self.cov_jitter)
+
+        momentum_seed, mh_seed = jr.split(seed)
+        momentum = _sample_momentum_diag_mass(mass_diag, momentum_seed, (D,))
+        tlp, tlp_grad = self.target_log_prob_and_grad(position)
+        energy = _kinetic_diag_mass(momentum, mass_diag) - tlp
+
+        momentum = momentum + 0.5 * step_size * tlp_grad
+
+        zm = jnp.concatenate((position, momentum))
+        zm = jax.lax.fori_loop(
+            0,
+            num_steps,
+            lambda _, s: self._scan_leapfrog_diag_mass(s, step_size, mass_diag),
+            zm,
+        )
+        new_position, new_momentum = jnp.split(zm, 2)
+        new_tlp, new_tlp_grad = self.target_log_prob_and_grad(new_position)
+        new_momentum = new_momentum - 0.5 * step_size * new_tlp_grad
+
+        new_energy = _kinetic_diag_mass(new_momentum, mass_diag) - new_tlp
+        log_accept_ratio = energy - new_energy
+
+        u = jr.uniform(mh_seed, [])
+        g = sigmoid_accept(log_accept_ratio - jnp.log(u))
+        new_position = g * new_position + (1.0 - g) * position
+
+        count_n, mean_n, m2_n = _welford_update_diag(count, mean, m2_diag, new_position)
+        return _pack_adaptive_state(new_position, count_n, mean_n, m2_n)
+
     def hmc_fn_for_deer(self, state, driver, params):
+        if self.adaptive_mass:
+            return self._hmc_adaptive_packed(state, driver, params)
+
         seed = driver
         position = state 
         step_size = params['epsilon'] 
@@ -252,20 +390,33 @@ class ParallelHMC:
     def run_sequential_hmc(self, key, initial_state, params):
 
         def _fn_for_scan(state, driver):
-            state = self.hmc_fn_for_deer(state, driver, params)
-            return state, state 
+            nxt = self.hmc_fn_for_deer(state, driver, params)
+            return nxt, nxt
 
         drivers = jr.split(key, (self.chain_length,))
-        _, out_states = jax.lax.scan(_fn_for_scan, initial_state, drivers)
-
-        return out_states
+        init = (
+            self._initial_packed_state(initial_state)
+            if self.adaptive_mass
+            else initial_state
+        )
+        _, out_states = jax.lax.scan(_fn_for_scan, init, drivers)
+        return self._positions_only(out_states) if self.adaptive_mass else out_states
 
     def run_parallel_hmc(self, key, initial_state, yinit_guess, params):
         drivers = jr.split(key, (self.chain_length,))
-        
+
+        y0 = (
+            self._initial_packed_state(initial_state)
+            if self.adaptive_mass
+            else initial_state
+        )
+        if self.adaptive_mass and yinit_guess is not None:
+            if yinit_guess.shape[-1] == self.D:
+                yinit_guess = self._expand_yinit_to_packed(yinit_guess)
+
         out_states, iters = deer.seq1d(
             func=self.hmc_fn_for_deer, 
-            y0=initial_state, 
+            y0=y0, 
             xinp=drivers, 
             params=params, 
             yinit_guess=yinit_guess, 
@@ -280,4 +431,9 @@ class ParallelHMC:
             rtol=self.rtol,
         )
 
-        return out_states, iters 
+        # return (
+        #     self._positions_only(out_states)
+        #     if self.adaptive_mass
+        #     else out_states
+        # ), iters
+        return out_states, iters
