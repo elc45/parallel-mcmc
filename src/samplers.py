@@ -402,7 +402,7 @@ class ParallelHMC:
         _, out_states = jax.lax.scan(_fn_for_scan, init, drivers)
         return self._positions_only(out_states) if self.adaptive_mass else out_states
 
-    def run_parallel_hmc(self, key, initial_state, yinit_guess, params):
+    def run_parallel_hmc(self, key, initial_state, init_trajectory_guess, params):
         drivers = jr.split(key, (self.chain_length,))
 
         y0 = (
@@ -410,16 +410,16 @@ class ParallelHMC:
             if self.adaptive_mass
             else initial_state
         )
-        if self.adaptive_mass and yinit_guess is not None:
-            if yinit_guess.shape[-1] == self.D:
-                yinit_guess = self._expand_yinit_to_packed(yinit_guess)
+        if self.adaptive_mass and init_trajectory_guess is not None:
+            if init_trajectory_guess.shape[-1] == self.D:
+                init_trajectory_guess = self._expand_yinit_to_packed(init_trajectory_guess)
 
         out_states, iters = deer.seq1d(
             func=self.hmc_fn_for_deer, 
             y0=y0, 
             xinp=drivers, 
             params=params, 
-            yinit_guess=yinit_guess, 
+            init_trajectory_guess=init_trajectory_guess, 
             max_iter=self.max_iter, 
             quasi=self.quasi, 
             qmem_efficient=False, 
