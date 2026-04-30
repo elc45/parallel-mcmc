@@ -20,20 +20,24 @@ def sigmoid_accept(x):
 
 
 def _packed_state_dim(D: int) -> int:
-    """Position (D) + count (1) + mean (D) + Welford M2 per coord (D)."""
-    return 3 * D + 1
+    """Position (D) + count (1) + draw mean (D) + draw M2 (D) + grad mean (D) + grad M2 (D)."""
+    return 5 * D + 1
 
 
 def _unpack_adaptive_state(packed: jnp.ndarray, D: int):
     position = packed[:D]
     count = packed[D]
-    mean = packed[D + 1 : 2 * D + 1]
-    m2_diag = packed[2 * D + 1 :]
-    return position, count, mean, m2_diag
+    mean_draw = packed[D + 1 : 2 * D + 1]
+    m2_draw = packed[2 * D + 1 : 3 * D + 1]
+    mean_grad = packed[3 * D + 1 : 4 * D + 1]
+    m2_grad = packed[4 * D + 1 :]
+    return position, count, mean_draw, m2_draw, mean_grad, m2_grad
 
 
-def _pack_adaptive_state(position, count, mean, m2_diag):
-    return jnp.concatenate([position, count[None], mean, m2_diag])
+def _pack_adaptive_state(position, count, mean_draw, m2_draw, mean_grad, m2_grad):
+    return jnp.concatenate(
+        [position, count[None], mean_draw, m2_draw, mean_grad, m2_grad]
+    )
 
 
 def _welford_update_diag(
@@ -62,6 +66,23 @@ def _variance_diag_from_welford(count: jnp.ndarray, m2_diag: jnp.ndarray) -> jnp
 def _mass_diag_identity_regularized(variance_diag: jnp.ndarray, lam: float) -> jnp.ndarray:
     """Diagonal mass M = diag(var_hat) + λ I, i.e. M_ii = variance_i + λ."""
     return variance_diag + lam
+
+
+def _mass_diag_sqrt_draw_over_grad_regularized(
+    draw_var: jnp.ndarray,
+    grad_var: jnp.ndarray,
+    count: jnp.ndarray,
+    lam: float,
+    eps: float = 1e-8,
+) -> jnp.ndarray:
+    """M_ii = sqrt(draw_var_i / grad_var_i) + λ; identity scaling until count > 1."""
+    eps_arr = jnp.array(eps, dtype=draw_var.dtype)
+    ratio = jnp.where(
+        count > 1.0,
+        draw_var / jnp.maximum(grad_var, eps_arr),
+        jnp.ones_like(draw_var),
+    )
+    return jnp.sqrt(ratio) + lam
 
 
 def _sample_momentum_diag_mass(mass_diag: jnp.ndarray, key, shape):
@@ -250,11 +271,12 @@ class ParallelHMC:
                                  (None = dtype default in deer.seq1d).
             rtol               - relative residual tolerance for DEER early stopping
                                  (None = dtype default in deer.seq1d).
-            adaptive_mass      - if True, carry per-coordinate Welford variance estimates and use
-                                 diagonal mass M = diag(var_hat) + cov_jitter * I within each
-                                 trajectory. Packed chain state has dim 3D+1.
-            cov_jitter         - λ in diag(var_hat) + λ I (regularizes toward scaled identity when
-                                 empirical variance is tiny; default 1.0 matches unit-mass scale).
+            adaptive_mass      - if True, carry per-coordinate Welford variance for draws and for
+                                 scores (gradients), and use diagonal mass
+                                 M_ii = sqrt(var_draw / var_grad) + cov_jitter within each trajectory.
+                                 Packed chain state has dim 5D+1.
+            cov_jitter         - λ added on the diagonal of the mass (regularizes scale when empirical
+                                 variances are tiny; default 1.0 matches unit-mass scale).
         '''
         self.log_prob = log_prob
         self.D = dim
@@ -297,11 +319,14 @@ class ParallelHMC:
     def _initial_packed_state(self, position: jnp.ndarray) -> jnp.ndarray:
         D = self.D
         dtype = position.dtype
+        z = jnp.zeros((D,), dtype=dtype)
         return _pack_adaptive_state(
             position,
             jnp.array(0.0, dtype=dtype),
-            jnp.zeros((D,), dtype=dtype),
-            jnp.zeros((D,), dtype=dtype),
+            z,
+            z,
+            z,
+            z,
         )
 
     def _expand_yinit_to_packed(self, y_positions: jnp.ndarray) -> jnp.ndarray:
@@ -315,15 +340,20 @@ class ParallelHMC:
         return states[..., : self.D]
 
     def _hmc_adaptive_packed(self, packed_state: jnp.ndarray, driver, params):
-        """One HMC step with M = diag(var_hat) + λ I (fixed within trajectory)."""
+        """One HMC step with M_ii = sqrt(Welford var(draw)_i / var(score)_i) + λ (fixed in trajectory)."""
         D = self.D
         step_size = params["epsilon"]
         num_steps = params["num_leapfrog_steps"]
         seed = driver
 
-        position, count, mean, m2_diag = _unpack_adaptive_state(packed_state, D)
-        variance_diag = _variance_diag_from_welford(count, m2_diag)
-        mass_diag = _mass_diag_identity_regularized(variance_diag, self.cov_jitter)
+        position, count, mean_draw, m2_draw, mean_grad, m2_grad = _unpack_adaptive_state(
+            packed_state, D
+        )
+        draw_var = _variance_diag_from_welford(count, m2_draw)
+        grad_var = _variance_diag_from_welford(count, m2_grad)
+        mass_diag = _mass_diag_sqrt_draw_over_grad_regularized(
+            draw_var, grad_var, count, self.cov_jitter
+        )
 
         momentum_seed, mh_seed = jr.split(seed)
         momentum = _sample_momentum_diag_mass(mass_diag, momentum_seed, (D,))
@@ -349,9 +379,17 @@ class ParallelHMC:
         u = jr.uniform(mh_seed, [])
         g = sigmoid_accept(log_accept_ratio - jnp.log(u))
         new_position = g * new_position + (1.0 - g) * position
+        grad_chain = g * new_tlp_grad + (1.0 - g) * tlp_grad
 
-        count_n, mean_n, m2_n = _welford_update_diag(count, mean, m2_diag, new_position)
-        return _pack_adaptive_state(new_position, count_n, mean_n, m2_n)
+        count_n, mean_draw_n, m2_draw_n = _welford_update_diag(
+            count, mean_draw, m2_draw, new_position
+        )
+        _, mean_grad_n, m2_grad_n = _welford_update_diag(
+            count, mean_grad, m2_grad, grad_chain
+        )
+        return _pack_adaptive_state(
+            new_position, count_n, mean_draw_n, m2_draw_n, mean_grad_n, m2_grad_n
+        )
 
     def hmc_fn_for_deer(self, state, driver, params):
         if self.adaptive_mass:

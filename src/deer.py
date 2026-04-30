@@ -50,7 +50,7 @@ def seq1d(
     y0: jnp.ndarray,
     xinp: Any,
     params: Any,
-    yinit_guess: Optional[jnp.ndarray] = None,
+    init_trajectory_guess: Optional[jnp.ndarray] = None,
     max_iter: int = 10000,
     memory_efficient: bool = False,
     quasi: bool = False,
@@ -80,7 +80,7 @@ def seq1d(
         The external input signal in a pytree of shape (T, *nx).
     params: Any
         The parameters of the function ``func``.
-    yinit_guess: jnp.ndarray or None
+    init_trajectory_guess: jnp.ndarray or None
         The initial guess of the full MCMC trajectory (T, D).
         If None, it will be initialized to the 0 vector.
     max_iter: int
@@ -110,8 +110,8 @@ def seq1d(
     """
     # set the default initial guess
     xinp_flat = jax.tree_util.tree_flatten(xinp)[0][0]
-    if yinit_guess is None:
-        yinit_guess = jnp.zeros(
+    if init_trajectory_guess is None:
+        init_trajectory_guess = jnp.zeros(
             (xinp_flat.shape[0], y0.shape[-1]), dtype=xinp_flat.dtype
         )  # (T, D)
 
@@ -132,7 +132,7 @@ def seq1d(
             xinput=xinp,
             init=y0,
             shifter_func_params=(y0,),
-            yinit_guess=yinit_guess,
+            init_trajectory_guess=init_trajectory_guess,
             max_iter=max_iter,
             memory_efficient=memory_efficient,
             clip_ytnext=True,
@@ -154,7 +154,7 @@ def seq1d(
             xinput=xinp,
             init=y0,
             shifter_func_params=(y0,),
-            yinit_guess=yinit_guess,
+            init_trajectory_guess=init_trajectory_guess,
             max_iter=max_iter,
             memory_efficient=memory_efficient,
             clip_ytnext=True,
@@ -167,7 +167,7 @@ def seq1d(
             rtol=rtol,
         )
     if full_trace:
-        return (jnp.vstack((yinit_guess[None, ...], yt)), samp_iters)
+        return (jnp.vstack((init_trajectory_guess[None, ...], yt)), samp_iters)
     else:
         return (yt, samp_iters)
 
@@ -180,7 +180,7 @@ def deer_iteration(
     xinput: Any,
     init: Any,
     shifter_func_params: Any,
-    yinit_guess: jnp.ndarray,
+    init_trajectory_guess: jnp.ndarray,
     max_iter: int = 100,
     memory_efficient: bool = False,
     clip_ytnext: bool = False,
@@ -200,7 +200,7 @@ def deer_iteration(
         xinput=xinput,
         inv_lin_params=(init,),
         shifter_func_params=shifter_func_params,
-        yinit_guess=yinit_guess,
+        init_trajectory_guess=init_trajectory_guess,
         max_iter=max_iter,
         memory_efficient=memory_efficient,
         clip_ytnext=clip_ytnext,
@@ -223,7 +223,7 @@ def deer_iteration_helper(
     xinput: Any,  # gradable
     inv_lin_params: Any,  # gradable
     shifter_func_params: Any,  # gradable
-    yinit_guess: jnp.ndarray,
+    init_trajectory_guess: jnp.ndarray,
     max_iter: int = 100,
     memory_efficient: bool = False,
     clip_ytnext: bool = False,
@@ -246,7 +246,7 @@ def deer_iteration_helper(
     jacfunc = jax.vmap(jax.jacfwd(func, argnums=0), in_axes=(0, 0, None))
     func2 = jax.vmap(func, in_axes=(0, 0, None))
 
-    dtype = yinit_guess.dtype
+    dtype = init_trajectory_guess.dtype
     default_tol = 1e-7 if dtype == jnp.float64 else 1e-4
     default_rtol = 1e-4 if dtype == jnp.float64 else 1e-3
     tol_effective = default_tol if tol is None else tol
@@ -300,19 +300,19 @@ def deer_iteration_helper(
 
     err = jnp.array(1e10, dtype=dtype)  # initial error should be very high
     gt = jnp.zeros(
-        (yinit_guess.shape[0], yinit_guess.shape[-1], yinit_guess.shape[-1]),
+        (init_trajectory_guess.shape[0], init_trajectory_guess.shape[-1], init_trajectory_guess.shape[-1]),
         dtype=dtype,
     )
 
     iiter = jnp.array(0, dtype=jnp.int32)
     if full_trace:
         _, Y_i = jax.lax.scan(
-            scan_func, (err, yinit_guess, gt, iiter), None, length=max_iter
+            scan_func, (err, init_trajectory_guess, gt, iiter), None, length=max_iter
         )
         samp_iters = max_iter
     else:
         _, Y_i, gt, samp_iters = jax.lax.while_loop(
-            cond_func, iter_func, (err, yinit_guess, gt, iiter)
+            cond_func, iter_func, (err, init_trajectory_guess, gt, iiter)
         )
     if progress_close is not None:
         jax.debug.callback(progress_close, samp_iters, ordered=True)
@@ -490,7 +490,7 @@ def diagonal_deer_iteration(
     xinput: Any,  # gradable
     init: jnp.ndarray,  # gradable
     shifter_func_params: Any,  # gradable
-    yinit_guess: jnp.ndarray,
+    init_trajectory_guess: jnp.ndarray,
     max_iter: int = 100,
     memory_efficient: bool = False,
     clip_ytnext: bool = False,
@@ -515,7 +515,7 @@ def diagonal_deer_iteration(
         jax.jacfwd(func, argnums=0), in_axes=(0, 0, None)
     )  # bunch of dense matrices
 
-    precond = preconditioner if preconditioner is not None else jnp.ones((yinit_guess.shape[-1]))
+    precond = preconditioner if preconditioner is not None else jnp.ones((init_trajectory_guess.shape[-1]))
 
     if qmem_efficient:
         def deer_jvp(z, driver, params, v):
@@ -524,7 +524,7 @@ def diagonal_deer_iteration(
 
     func2 = jax.vmap(func, in_axes=(0, 0, None))
 
-    dtype = yinit_guess.dtype
+    dtype = init_trajectory_guess.dtype
     default_tol = 1e-7 if dtype == jnp.float64 else 5e-4
     default_rtol = 1e-4 if dtype == jnp.float64 else 1e-3
     tol_effective = default_tol if tol is None else tol
@@ -598,18 +598,18 @@ def diagonal_deer_iteration(
 
     err = jnp.array(1e10, dtype=dtype)  # initial error should be very high
     gt = jnp.zeros(
-        (yinit_guess.shape[0], yinit_guess.shape[-1]),
+        (init_trajectory_guess.shape[0], init_trajectory_guess.shape[-1]),
         dtype=dtype,
     )
     iiter = jnp.array(0, dtype=jnp.int32)
     if full_trace:
         _, yt = jax.lax.scan(
-            scan_func, (err, yinit_guess, gt, iiter), None, length=max_iter
+            scan_func, (err, init_trajectory_guess, gt, iiter), None, length=max_iter
         )
         samp_iters = max_iter
     else:
         _, yt, gt, samp_iters = jax.lax.while_loop(
-            cond_func, iter_func, (err, yinit_guess, gt, iiter)
+            cond_func, iter_func, (err, init_trajectory_guess, gt, iiter)
         )
     if progress_close is not None:
         jax.debug.callback(progress_close, samp_iters, ordered=True)

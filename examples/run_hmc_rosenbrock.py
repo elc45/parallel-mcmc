@@ -47,7 +47,7 @@ params = {}
 params["epsilon"] = 0.5
 params["num_leapfrog_steps"] = 8
 
-# adaptive_mass: M = diag(Welford var) + cov_jitter * I (packed dim 3D+1).
+# adaptive_mass: M_ii = sqrt(Welford var(draw)/var(score)) + cov_jitter (packed dim 5D+1).
 sampler = samplers.ParallelHMC(target_log_prob, D, chain_length, max_iter,
     full_trace=False, damp_factor=damp_factor, show_progress=_SHOW_DEER_PROGRESS, 
     tol=tol, rtol=rtol, adaptive_mass=True)
