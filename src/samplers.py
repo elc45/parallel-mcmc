@@ -25,6 +25,26 @@ def _packed_state_dim(D: int) -> int:
 
 
 def _unpack_adaptive_state(packed: jnp.ndarray, D: int):
+    """Unpack the packed state x into the constituent parts: position, count, mean_draw, m2_draw, mean_grad, m2_grad.
+    Args:
+        packed: jnp.ndarray
+            The packed state x.
+        D: int
+            The dimension of the parameter space.
+    Returns:
+        position: jnp.ndarray
+            The draws.
+        count: jnp.ndarray
+            The count of the draws at each iteration.
+        mean_draw: jnp.ndarray
+            The estimated Welford mean of the draws at each iteration.
+        m2_draw: jnp.ndarray
+            The estimated Welford second moment of the draws at each iteration.
+        mean_grad: jnp.ndarray
+            The estimated Welford mean of the gradients at each iteration.
+        m2_grad: jnp.ndarray
+            The estimated Welford second moment of the gradients at each iteration.
+    """
     position = packed[:D]
     count = packed[D]
     mean_draw = packed[D + 1 : 2 * D + 1]
@@ -34,7 +54,45 @@ def _unpack_adaptive_state(packed: jnp.ndarray, D: int):
     return position, count, mean_draw, m2_draw, mean_grad, m2_grad
 
 
+def _unpack_adaptive_state_trajectory(packed: jnp.ndarray, D: int):
+    """Unpack many packed adaptive states; packed layout matches `_unpack_adaptive_state` on the last axis.
+
+    Args:
+        packed: jnp.ndarray
+            Shape ``(..., 5 * D + 1)``: one packed state per leading batch / time index.
+        D: int
+            Parameter dimension.
+
+    Returns:
+        position: jnp.ndarray, shape ``(..., D)``
+        count: jnp.ndarray, shape ``(...)``
+        mean_draw: jnp.ndarray, shape ``(..., D)``
+        m2_draw: jnp.ndarray, shape ``(..., D)``
+        mean_grad: jnp.ndarray, shape ``(..., D)``
+        m2_grad: jnp.ndarray, shape ``(..., D)``
+    """
+    position = packed[..., :D]
+    count = packed[..., D]
+    mean_draw = packed[..., D + 1 : 2 * D + 1]
+    m2_draw = packed[..., 2 * D + 1 : 3 * D + 1]
+    mean_grad = packed[..., 3 * D + 1 : 4 * D + 1]
+    m2_grad = packed[..., 4 * D + 1 :]
+    return position, count, mean_draw, m2_draw, mean_grad, m2_grad
+
+
 def _pack_adaptive_state(position, count, mean_draw, m2_draw, mean_grad, m2_grad):
+    """Pack the constituent parts into a packed state x.
+    Args:
+        position: jnp.ndarray
+        count: jnp.ndarray
+        mean_draw: jnp.ndarray
+        m2_draw: jnp.ndarray
+        mean_grad: jnp.ndarray
+        m2_grad: jnp.ndarray
+    Returns:
+        packed: jnp.ndarray
+            The packed state x.
+    """
     return jnp.concatenate(
         [position, count[None], mean_draw, m2_draw, mean_grad, m2_grad]
     )
@@ -46,7 +104,7 @@ def _welford_update_diag(
     m2_diag: jnp.ndarray,
     x: jnp.ndarray,
 ):
-    """Online variance accumulators per coordinate; returns (count_new, mean_new, m2_diag_new)."""
+    """Online coord-wise variance accumulators updates applied at each iter; returns (count_new, mean_new, m2_diag_new)."""
     n_new = count + 1.0
     delta = x - mean
     mean_new = mean + delta / n_new
@@ -68,7 +126,7 @@ def _mass_diag_identity_regularized(variance_diag: jnp.ndarray, lam: float) -> j
     return variance_diag + lam
 
 
-def _mass_diag_sqrt_draw_over_grad_regularized(
+def _mass_matrix_update(
     draw_var: jnp.ndarray,
     grad_var: jnp.ndarray,
     count: jnp.ndarray,
@@ -310,11 +368,11 @@ class ParallelHMC:
 
     def _scan_leapfrog_diag_mass(self, state: jnp.ndarray, step_size, mass_diag: jnp.ndarray):
         """Leapfrog with diagonal mass M: dq/dt = M^{-1} p => q += eps * (p / mass_diag)."""
-        z, m = jnp.split(state, 2)
-        z = z + step_size * (m / mass_diag)
-        _, tlp_grad = self.target_log_prob_and_grad(z)
-        m = m + step_size * tlp_grad
-        return jnp.concatenate((z, m))
+        position, momentum = jnp.split(state, 2)
+        position = position + step_size * (momentum / mass_diag)
+        _, tlp_grad = self.target_log_prob_and_grad(position)
+        momentum = momentum + step_size * tlp_grad
+        return jnp.concatenate((position, momentum))
 
     def _initial_packed_state(self, position: jnp.ndarray) -> jnp.ndarray:
         D = self.D
@@ -329,8 +387,8 @@ class ParallelHMC:
             z,
         )
 
-    def _expand_yinit_to_packed(self, y_positions: jnp.ndarray) -> jnp.ndarray:
-        """Expand (T, D) trajectory guess to (T, chain_state_dim) with zero Welford slots."""
+    def _pack_init_trajectory_guess(self, y_positions: jnp.ndarray) -> jnp.ndarray:
+        """Expand an initial (T, D) trajectory guess to a (T, packed_state_dim) packed state with zero Welford slots."""
         T, D = y_positions.shape
         tail = jnp.zeros((T, self.chain_state_dim - D), dtype=y_positions.dtype)
         return jnp.concatenate([y_positions, tail], axis=-1)
@@ -339,7 +397,7 @@ class ParallelHMC:
         """Take leading D dims when adaptive; pass-through shape-safe when not."""
         return states[..., : self.D]
 
-    def _hmc_adaptive_packed(self, packed_state: jnp.ndarray, driver, params):
+    def _hmc_adaptive_mass(self, packed_state: jnp.ndarray, driver, params):
         """One HMC step with M_ii = sqrt(Welford var(draw)_i / var(score)_i) + λ (fixed in trajectory)."""
         D = self.D
         step_size = params["epsilon"]
@@ -351,7 +409,7 @@ class ParallelHMC:
         )
         draw_var = _variance_diag_from_welford(count, m2_draw)
         grad_var = _variance_diag_from_welford(count, m2_grad)
-        mass_diag = _mass_diag_sqrt_draw_over_grad_regularized(
+        mass_diag = _mass_matrix_update(
             draw_var, grad_var, count, self.cov_jitter
         )
 
@@ -393,7 +451,7 @@ class ParallelHMC:
 
     def hmc_fn_for_deer(self, state, driver, params):
         if self.adaptive_mass:
-            return self._hmc_adaptive_packed(state, driver, params)
+            return self._hmc_adaptive_mass(state, driver, params)
 
         seed = driver
         position = state 
@@ -450,7 +508,7 @@ class ParallelHMC:
         )
         if self.adaptive_mass and init_trajectory_guess is not None:
             if init_trajectory_guess.shape[-1] == self.D:
-                init_trajectory_guess = self._expand_yinit_to_packed(init_trajectory_guess)
+                init_trajectory_guess = self._pack_init_trajectory_guess(init_trajectory_guess)
 
         out_states, iters = deer.seq1d(
             func=self.hmc_fn_for_deer, 

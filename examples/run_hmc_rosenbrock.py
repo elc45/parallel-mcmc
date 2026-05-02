@@ -34,14 +34,15 @@ def target_log_prob(x):
     fldj = target.default_event_space_bijector.forward_log_det_jacobian(x)
     return target.unnormalized_log_prob(y) + fldj
 
-chain_length = 300
-key = jr.PRNGKey(1313)
+chain_length = 3000
+key = jr.PRNGKey(1234)
 key, skey = jr.split(key)
 initial_state = 0. + 10. * jr.normal(skey, (D,))
-max_iter = chain_length + 1
+max_iter = chain_length + 10
 damp_factor = 0.55
 tol = 1e-4
 rtol = 1e-4
+adaptive_mass = True
 
 params = {}
 params["epsilon"] = 0.5
@@ -50,7 +51,7 @@ params["num_leapfrog_steps"] = 8
 # adaptive_mass: M_ii = sqrt(Welford var(draw)/var(score)) + cov_jitter (packed dim 5D+1).
 sampler = samplers.ParallelHMC(target_log_prob, D, chain_length, max_iter,
     full_trace=False, damp_factor=damp_factor, show_progress=_SHOW_DEER_PROGRESS, 
-    tol=tol, rtol=rtol, adaptive_mass=True)
+    tol=tol, rtol=rtol, adaptive_mass=adaptive_mass)
 
 run_sequential = jax.jit(sampler.run_sequential_hmc)
 run_parallel = jax.jit(sampler.run_parallel_hmc)
@@ -74,7 +75,7 @@ sampler = samplers.ParallelHMC(
     quasi=True,
     tol=tol,
     rtol=rtol,
-    adaptive_mass=True,
+    adaptive_mass=adaptive_mass,
 )
 
 print("Re-running parallel HMC with full trace for visualization")
@@ -97,6 +98,7 @@ for ax_idx, itr in enumerate([1, 10, 25, max_iter], start=1):
         seq_with_init[:, 0],
         seq_with_init[:, 1],
         color="k",
+        alpha=0.75,
         lw=1.2,
         rasterized=True,
         zorder=1,
@@ -117,4 +119,4 @@ for ax_idx, itr in enumerate([1, 10, 25, max_iter], start=1):
         plt.legend()
 plt.suptitle(f"{chain_length} HMC Samples", fontsize=16, fontweight="bold")
 plt.tight_layout()
-plt.savefig(PLOT_DIR / f"hmc_{target.name}_adaptive_mass.png", dpi=150, bbox_inches="tight")
+plt.savefig(PLOT_DIR / f"hmc_{target.name}_adapt-{adaptive_mass}.png", dpi=150, bbox_inches="tight")
