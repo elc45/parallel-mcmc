@@ -146,7 +146,7 @@ def seq1d(
             rtol=rtol,
         )
     else:
-        yt, _, _, _, samp_iters = deer_iteration(
+        yt, samp_iters = deer_iteration(
             inv_lin=seq1d_inv_lin,
             func=func,
             shifter_func=shifter_func,

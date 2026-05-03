@@ -17,11 +17,11 @@ PLOT_DIR.mkdir(parents=True, exist_ok=True)
 
 _SHOW_DEER_PROGRESS = __name__ == "__main__"
 
-target = gym.targets.VectorModel(gym.targets.Banana(curvature=0.05),
-                                  flatten_sample_transformations=True)
+# target = gym.targets.VectorModel(gym.targets.Banana(curvature=0.05),
+#                                   flatten_sample_transformations=True)
 
-# target = gym.targets.VectorModel(gym.targets.IllConditionedGaussian(ndims=2, seed=123),
-#                                 flatten_sample_transformations=True)
+target = gym.targets.VectorModel(gym.targets.IllConditionedGaussian(ndims=2, seed=123),
+                                flatten_sample_transformations=True)
 
 D = target.event_shape[0]
 
@@ -34,7 +34,7 @@ def target_log_prob(x):
     fldj = target.default_event_space_bijector.forward_log_det_jacobian(x)
     return target.unnormalized_log_prob(y) + fldj
 
-chain_length = 300
+chain_length = 3000
 key = jr.PRNGKey(1234)
 key, skey = jr.split(key)
 initial_state = 0. + 10. * jr.normal(skey, (D,))
@@ -43,6 +43,7 @@ damp_factor = 0.55
 tol = 1e-4
 rtol = 1e-4
 adaptive_mass = False
+quasi = False
 
 params = {}
 params["epsilon"] = 0.5
@@ -51,7 +52,7 @@ params["num_leapfrog_steps"] = 8
 # adaptive_mass: M_ii = sqrt(Welford var(draw)/var(score)) + cov_jitter (packed dim 5D+1).
 sampler = samplers.ParallelHMC(target_log_prob, D, chain_length, max_iter,
     full_trace=False, damp_factor=damp_factor, show_progress=_SHOW_DEER_PROGRESS, 
-    tol=tol, rtol=rtol, adaptive_mass=adaptive_mass)
+    tol=tol, rtol=rtol, adaptive_mass=adaptive_mass, quasi=quasi)
 
 run_sequential = jax.jit(sampler.run_sequential_hmc)
 run_parallel = jax.jit(sampler.run_parallel_hmc)
@@ -72,7 +73,7 @@ sampler = samplers.ParallelHMC(
     full_trace=True,
     damp_factor=damp_factor,
     show_progress=_SHOW_DEER_PROGRESS,
-    quasi=True,
+    quasi=quasi,
     tol=tol,
     rtol=rtol,
     adaptive_mass=adaptive_mass,
@@ -117,6 +118,6 @@ for ax_idx, itr in enumerate([1, 10, 25, max_iter], start=1):
     plt.title(f"Parallel Iteration {itr}", fontsize=12)
     if ax_idx == 1:
         plt.legend()
-plt.suptitle(f"{chain_length} HMC Samples", fontsize=16, fontweight="bold")
+plt.suptitle(f"{chain_length} HMC Samples, quasi={quasi}", fontsize=16, fontweight="bold")
 plt.tight_layout()
-plt.savefig(PLOT_DIR / f"hmc_{target.name}_adapt-{adaptive_mass}.png", dpi=150, bbox_inches="tight")
+plt.savefig(PLOT_DIR / f"hmc_{target.name}_adapt-{adaptive_mass}_quasi-{quasi}.png", dpi=150, bbox_inches="tight")
