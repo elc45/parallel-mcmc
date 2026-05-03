@@ -388,10 +388,14 @@ class ParallelHMC:
         )
 
     def _pack_init_trajectory_guess(self, y_positions: jnp.ndarray) -> jnp.ndarray:
-        """Expand an initial (T, D) trajectory guess to a (T, packed_state_dim) packed state with zero Welford slots."""
+        """Expand an initial (T, D) trajectory guess to a (T, packed_state_dim) state with zero Welford slots."""
         T, D = y_positions.shape
-        tail = jnp.zeros((T, self.chain_state_dim - D), dtype=y_positions.dtype)
-        return jnp.concatenate([y_positions, tail], axis=-1)
+        count = jnp.zeros((T, 1), dtype=y_positions.dtype)
+        draw_means = jnp.zeros((T, D), dtype=y_positions.dtype)
+        draw_m2s = jnp.ones((T, D), dtype=y_positions.dtype)
+        grad_means = jnp.zeros((T, D), dtype=y_positions.dtype)
+        grad_m2s = jnp.ones((T, D), dtype=y_positions.dtype)
+        return jnp.concatenate([y_positions, count, draw_means, draw_m2s, grad_means, grad_m2s], axis=-1)
 
     def _positions_only(self, states: jnp.ndarray) -> jnp.ndarray:
         """Take leading D dims when adaptive; pass-through shape-safe when not."""

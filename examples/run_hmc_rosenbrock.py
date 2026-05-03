@@ -17,11 +17,11 @@ PLOT_DIR.mkdir(parents=True, exist_ok=True)
 
 _SHOW_DEER_PROGRESS = __name__ == "__main__"
 
-# target = gym.targets.VectorModel(gym.targets.Banana(curvature=0.05),
-#                                   flatten_sample_transformations=True)
+target = gym.targets.VectorModel(gym.targets.Banana(curvature=0.05),
+                                  flatten_sample_transformations=True)
 
-target = gym.targets.VectorModel(gym.targets.IllConditionedGaussian(ndims=2, seed=123),
-                                flatten_sample_transformations=True)
+# target = gym.targets.VectorModel(gym.targets.IllConditionedGaussian(ndims=2, seed=123),
+#                                 flatten_sample_transformations=True)
 
 D = target.event_shape[0]
 
@@ -34,7 +34,7 @@ def target_log_prob(x):
     fldj = target.default_event_space_bijector.forward_log_det_jacobian(x)
     return target.unnormalized_log_prob(y) + fldj
 
-chain_length = 3000
+chain_length = 300
 key = jr.PRNGKey(1234)
 key, skey = jr.split(key)
 initial_state = 0. + 10. * jr.normal(skey, (D,))
@@ -42,7 +42,7 @@ max_iter = chain_length + 10
 damp_factor = 0.55
 tol = 1e-4
 rtol = 1e-4
-adaptive_mass = True
+adaptive_mass = False
 
 params = {}
 params["epsilon"] = 0.5
@@ -58,8 +58,8 @@ run_parallel = jax.jit(sampler.run_parallel_hmc)
 
 states_seq = run_sequential(key, initial_state, params)
 
-yinit_guess = initial_state[None, :] * jnp.ones((chain_length, D))
-states_par, iters = run_parallel(key, initial_state, yinit_guess, params)
+init_trajectory_guess = initial_state[None, :] * jnp.ones((chain_length, D))
+states_par, iters = run_parallel(key, initial_state, init_trajectory_guess, params)
 print(f"Parallel samplers converged in {iters} iters")
 
 max_iter = iters + 1
@@ -80,7 +80,7 @@ sampler = samplers.ParallelHMC(
 
 print("Re-running parallel HMC with full trace for visualization")
 run_parallel = jax.jit(sampler.run_parallel_hmc)
-states_par, iters = run_parallel(key, initial_state, yinit_guess, params)
+states_par, iters = run_parallel(key, initial_state, init_trajectory_guess, params)
 
 plt.figure(figsize=[8, 8])
 for ax_idx, itr in enumerate([1, 10, 25, max_iter], start=1):
