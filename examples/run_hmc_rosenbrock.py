@@ -7,7 +7,8 @@ import jax.numpy as jnp
 import jax.random as jr
 from src import samplers
 from pathlib import Path
-import matplotlib.pyplot as plt
+
+import plot as hmc_plot
 from inference_gym import using_jax as gym
 from tensorflow_probability.substrates import jax as tfp
 tfd = tfp.distributions
@@ -34,7 +35,7 @@ def target_log_prob(x):
     fldj = target.default_event_space_bijector.forward_log_det_jacobian(x)
     return target.unnormalized_log_prob(y) + fldj
 
-chain_length = 3000
+chain_length = 1000
 key = jr.PRNGKey(1234)
 key, skey = jr.split(key)
 initial_state = 0. + 10. * jr.normal(skey, (D,))
@@ -42,14 +43,14 @@ max_iter = chain_length + 10
 damp_factor = 0.55
 tol = 1e-4
 rtol = 1e-4
-adaptive_mass = False
-quasi = False
+adaptive_mass = "grad"
+quasi = True
 
 params = {}
 params["epsilon"] = 0.5
 params["num_leapfrog_steps"] = 8
 
-# adaptive_mass: M_ii = sqrt(Welford var(draw)/var(score)) + cov_jitter (packed dim 5D+1).
+# "draw-only": M_ii = var(draw) + cov_jitter (3D+1 packed). "grad": sqrt(var_draw/var_grad)+λ (5D+1).
 sampler = samplers.ParallelHMC(target_log_prob, D, chain_length, max_iter,
     full_trace=False, damp_factor=damp_factor, show_progress=_SHOW_DEER_PROGRESS, 
     tol=tol, rtol=rtol, adaptive_mass=adaptive_mass, quasi=quasi)
@@ -83,41 +84,18 @@ print("Re-running parallel HMC with full trace for visualization")
 run_parallel = jax.jit(sampler.run_parallel_hmc)
 states_par, iters = run_parallel(key, initial_state, init_trajectory_guess, params)
 
-plt.figure(figsize=[8, 8])
-for ax_idx, itr in enumerate([1, 10, 25, max_iter], start=1):
-    plt.subplot(2, 2, ax_idx)
-    plt.plot(
-        states_par[itr][:, 0],
-        states_par[itr][:, 1],
-        alpha=0.75,
-        rasterized=True,
-        zorder=2,
-        label="Parallel",
-    )
-    seq_with_init = jnp.vstack([initial_state[None, :], states_seq])
-    plt.plot(
-        seq_with_init[:, 0],
-        seq_with_init[:, 1],
-        color="k",
-        alpha=0.75,
-        lw=1.2,
-        rasterized=True,
-        zorder=1,
-        label="Sequential",
-    )
-    plt.scatter(
-        initial_state[0],
-        initial_state[1],
-        color="red",
-        s=60,
-        zorder=3,
-        label="Initial state" if ax_idx == 1 else None,
-    )
-    plt.xlabel("$x_1$", fontsize=16)
-    plt.ylabel("$x_2$", fontsize=16)
-    plt.title(f"Parallel Iteration {itr}", fontsize=12)
-    if ax_idx == 1:
-        plt.legend()
-plt.suptitle(f"{chain_length} HMC Samples, quasi={quasi}", fontsize=16, fontweight="bold")
-plt.tight_layout()
-plt.savefig(PLOT_DIR / f"hmc_{target.name}_adapt-{adaptive_mass}_quasi-{quasi}.png", dpi=150, bbox_inches="tight")
+hmc_plot.progress_plot(
+    states_par,
+    states_seq,
+    initial_state,
+    [1, 10, 25, max_iter],
+    chain_length=chain_length,
+    quasi=quasi,
+    savepath=PLOT_DIR / f"hmc_{target.name}_adapt-{adaptive_mass}_quasi-{quasi}-2.png",
+)
+hmc_plot.newton_max_error_plot(
+    states_par,
+    rtol=rtol,
+    savepath=PLOT_DIR / f"hmc_{target.name}_adapt-{adaptive_mass}_quasi-{quasi}_newton_err.png",
+    title=f"DEER Newton error ({target.name})",
+)

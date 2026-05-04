@@ -4,6 +4,7 @@ import jax.numpy as jnp
 import jax.random as jr
 
 from collections.abc import Callable
+from typing import Literal
 
 import src
 from src import deer, windowed_qdeer
@@ -19,9 +20,50 @@ def sigmoid_accept(x):
     return zero + jax.lax.stop_gradient((x > 0))
 
 
-def _packed_state_dim(D: int) -> int:
-    """Position (D) + count (1) + draw mean (D) + draw M2 (D) + grad mean (D) + grad M2 (D)."""
+def _normalize_adaptive_mass(
+    adaptive_mass: str | bool | None,
+) -> Literal["grad", "draw-only"] | None:
+    """Map constructor input to None, ``\"grad\"``, or ``\"draw-only\"``."""
+    if adaptive_mass is None or adaptive_mass is False:
+        return None
+    if adaptive_mass is True:
+        return "grad"
+    if not isinstance(adaptive_mass, str):
+        raise TypeError(
+            "adaptive_mass must be None, bool, or str, "
+            f"got {type(adaptive_mass).__name__}"
+        )
+    key = adaptive_mass.strip().lower()
+    if key in ("none", ""):
+        return None
+    if key == "grad":
+        return "grad"
+    if key in ("draw-only", "draw_only", "drawonly"):
+        return "draw-only"
+    raise ValueError(
+        "adaptive_mass must be None, 'grad', or 'draw-only' "
+        f"(got {adaptive_mass!r})"
+    )
+
+
+def _packed_state_dim(D: int, mode: Literal["grad", "draw-only"]) -> int:
+    """Packed chain state length for adaptive mass."""
+    if mode == "draw-only":
+        return 3 * D + 1
     return 5 * D + 1
+
+
+def _unpack_draw_only(packed: jnp.ndarray, D: int):
+    """Position (D) + count (1) + mean (D) + M2 (D)."""
+    position = packed[:D]
+    count = packed[D]
+    mean = packed[D + 1 : 2 * D + 1]
+    m2_diag = packed[2 * D + 1 :]
+    return position, count, mean, m2_diag
+
+
+def _pack_draw_only(position, count, mean, m2_diag):
+    return jnp.concatenate([position, count[None], mean, m2_diag])
 
 
 def _unpack_adaptive_state(packed: jnp.ndarray, D: int):
@@ -54,8 +96,17 @@ def _unpack_adaptive_state(packed: jnp.ndarray, D: int):
     return position, count, mean_draw, m2_draw, mean_grad, m2_grad
 
 
+def _unpack_draw_only_trajectory(packed: jnp.ndarray, D: int):
+    """Like `_unpack_draw_only` but last axis is packed state ``(..., 3 * D + 1)``."""
+    position = packed[..., :D]
+    count = packed[..., D]
+    mean = packed[..., D + 1 : 2 * D + 1]
+    m2_diag = packed[..., 2 * D + 1 :]
+    return position, count, mean, m2_diag
+
+
 def _unpack_adaptive_state_trajectory(packed: jnp.ndarray, D: int):
-    """Unpack many packed adaptive states; packed layout matches `_unpack_adaptive_state` on the last axis.
+    """Unpack many packed adaptive states; layout matches `_unpack_adaptive_state` (grad mode).
 
     Args:
         packed: jnp.ndarray
@@ -285,7 +336,7 @@ class ParallelHMC:
     show_progress: bool
     tol: float | None
     rtol: float | None
-    adaptive_mass: bool
+    adaptive_mass: Literal["grad", "draw-only"] | None
     cov_jitter: float
     chain_state_dim: int
     target_log_prob_and_grad: Callable
@@ -304,7 +355,7 @@ class ParallelHMC:
                 show_progress: bool = False, 
                 tol: float | None = None, 
                 rtol: float | None = None,
-                adaptive_mass: bool = False,
+                adaptive_mass: str | bool | None = None,
                 cov_jitter: float = 1.0):
         '''
         Args:
@@ -329,10 +380,12 @@ class ParallelHMC:
                                  (None = dtype default in deer.seq1d).
             rtol               - relative residual tolerance for DEER early stopping
                                  (None = dtype default in deer.seq1d).
-            adaptive_mass      - if True, carry per-coordinate Welford variance for draws and for
-                                 scores (gradients), and use diagonal mass
-                                 M_ii = sqrt(var_draw / var_grad) + cov_jitter within each trajectory.
-                                 Packed chain state has dim 5D+1.
+            adaptive_mass      - None: fixed identity mass (default). ``\"draw-only\"``: Welford
+                                 variance of draws only; M_ii = var_draw_i + cov_jitter; packed dim
+                                 3D+1. ``\"grad\"``: Welford variances of draws and scores; M_ii =
+                                 sqrt(var_draw/var_grad) + cov_jitter; packed dim 5D+1. For backward
+                                 compatibility, ``True`` is treated as ``\"grad\"`` and ``False`` as
+                                 None.
             cov_jitter         - λ added on the diagonal of the mass (regularizes scale when empirical
                                  variances are tiny; default 1.0 matches unit-mass scale).
         '''
@@ -350,9 +403,13 @@ class ParallelHMC:
         self.show_progress = show_progress
         self.tol = tol
         self.rtol = rtol
-        self.adaptive_mass = adaptive_mass
+        self.adaptive_mass = _normalize_adaptive_mass(adaptive_mass)
         self.cov_jitter = cov_jitter
-        self.chain_state_dim = _packed_state_dim(dim) if adaptive_mass else dim
+        self.chain_state_dim = (
+            _packed_state_dim(dim, self.adaptive_mass)
+            if self.adaptive_mass is not None
+            else dim
+        )
 
     def scan_leapfrog(self, state, step_size):
         # Assumes you start and end 
@@ -378,30 +435,72 @@ class ParallelHMC:
         D = self.D
         dtype = position.dtype
         z = jnp.zeros((D,), dtype=dtype)
-        return _pack_adaptive_state(
-            position,
-            jnp.array(0.0, dtype=dtype),
-            z,
-            z,
-            z,
-            z,
-        )
+        c = jnp.array(0.0, dtype=dtype)
+        if self.adaptive_mass == "draw-only":
+            return _pack_draw_only(position, c, z, z)
+        return _pack_adaptive_state(position, c, z, z, z, z)
 
     def _pack_init_trajectory_guess(self, y_positions: jnp.ndarray) -> jnp.ndarray:
-        """Expand an initial (T, D) trajectory guess to a (T, packed_state_dim) state with zero Welford slots."""
+        """Expand an initial (T, D) trajectory guess to (T, chain_state_dim) with Welford slots."""
         T, D = y_positions.shape
-        count = jnp.zeros((T, 1), dtype=y_positions.dtype)
-        draw_means = jnp.zeros((T, D), dtype=y_positions.dtype)
-        draw_m2s = jnp.ones((T, D), dtype=y_positions.dtype)
-        grad_means = jnp.zeros((T, D), dtype=y_positions.dtype)
-        grad_m2s = jnp.ones((T, D), dtype=y_positions.dtype)
-        return jnp.concatenate([y_positions, count, draw_means, draw_m2s, grad_means, grad_m2s], axis=-1)
+        dtype = y_positions.dtype
+        count = jnp.zeros((T, 1), dtype=dtype)
+        if self.adaptive_mass == "draw-only":
+            means = jnp.zeros((T, D), dtype=dtype)
+            m2s = jnp.zeros((T, D), dtype=dtype)
+            return jnp.concatenate([y_positions, count, means, m2s], axis=-1)
+        draw_means = jnp.zeros((T, D), dtype=dtype)
+        draw_m2s = jnp.zeros((T, D), dtype=dtype)
+        grad_means = jnp.zeros((T, D), dtype=dtype)
+        grad_m2s = jnp.zeros((T, D), dtype=dtype)
+        return jnp.concatenate(
+            [y_positions, count, draw_means, draw_m2s, grad_means, grad_m2s], axis=-1
+        )
 
     def _positions_only(self, states: jnp.ndarray) -> jnp.ndarray:
         """Take leading D dims when adaptive; pass-through shape-safe when not."""
         return states[..., : self.D]
 
-    def _hmc_adaptive_mass(self, packed_state: jnp.ndarray, driver, params):
+    def _hmc_adaptive_mass_draw_only(self, packed_state: jnp.ndarray, driver, params):
+        """One HMC step with M_ii = Welford var(draw)_i + λ (fixed in trajectory)."""
+        D = self.D
+        step_size = params["epsilon"]
+        num_steps = params["num_leapfrog_steps"]
+        seed = driver
+
+        position, count, mean, m2_diag = _unpack_draw_only(packed_state, D)
+        variance_diag = _variance_diag_from_welford(count, m2_diag)
+        mass_diag = _mass_diag_identity_regularized(variance_diag, self.cov_jitter)
+
+        momentum_seed, mh_seed = jr.split(seed)
+        momentum = _sample_momentum_diag_mass(mass_diag, momentum_seed, (D,))
+        tlp, tlp_grad = self.target_log_prob_and_grad(position)
+        energy = _kinetic_diag_mass(momentum, mass_diag) - tlp
+
+        momentum = momentum + 0.5 * step_size * tlp_grad
+
+        zm = jnp.concatenate((position, momentum))
+        zm = jax.lax.fori_loop(
+            0,
+            num_steps,
+            lambda _, s: self._scan_leapfrog_diag_mass(s, step_size, mass_diag),
+            zm,
+        )
+        new_position, new_momentum = jnp.split(zm, 2)
+        new_tlp, new_tlp_grad = self.target_log_prob_and_grad(new_position)
+        new_momentum = new_momentum - 0.5 * step_size * new_tlp_grad
+
+        new_energy = _kinetic_diag_mass(new_momentum, mass_diag) - new_tlp
+        log_accept_ratio = energy - new_energy
+
+        u = jr.uniform(mh_seed, [])
+        g = sigmoid_accept(log_accept_ratio - jnp.log(u))
+        new_position = g * new_position + (1.0 - g) * position
+
+        count_n, mean_n, m2_n = _welford_update_diag(count, mean, m2_diag, new_position)
+        return _pack_draw_only(new_position, count_n, mean_n, m2_n)
+
+    def _hmc_adaptive_mass_grad(self, packed_state: jnp.ndarray, driver, params):
         """One HMC step with M_ii = sqrt(Welford var(draw)_i / var(score)_i) + λ (fixed in trajectory)."""
         D = self.D
         step_size = params["epsilon"]
@@ -454,8 +553,10 @@ class ParallelHMC:
         )
 
     def hmc_fn_for_deer(self, state, driver, params):
-        if self.adaptive_mass:
-            return self._hmc_adaptive_mass(state, driver, params)
+        if self.adaptive_mass == "grad":
+            return self._hmc_adaptive_mass_grad(state, driver, params)
+        if self.adaptive_mass == "draw-only":
+            return self._hmc_adaptive_mass_draw_only(state, driver, params)
 
         seed = driver
         position = state 
@@ -496,21 +597,25 @@ class ParallelHMC:
         drivers = jr.split(key, (self.chain_length,))
         init = (
             self._initial_packed_state(initial_state)
-            if self.adaptive_mass
+            if self.adaptive_mass is not None
             else initial_state
         )
         _, out_states = jax.lax.scan(_fn_for_scan, init, drivers)
-        return self._positions_only(out_states) if self.adaptive_mass else out_states
+        return (
+            self._positions_only(out_states)
+            if self.adaptive_mass is not None
+            else out_states
+        )
 
     def run_parallel_hmc(self, key, initial_state, init_trajectory_guess, params):
         drivers = jr.split(key, (self.chain_length,))
 
         y0 = (
             self._initial_packed_state(initial_state)
-            if self.adaptive_mass
+            if self.adaptive_mass is not None
             else initial_state
         )
-        if self.adaptive_mass and init_trajectory_guess is not None:
+        if self.adaptive_mass is not None and init_trajectory_guess is not None:
             if init_trajectory_guess.shape[-1] == self.D:
                 init_trajectory_guess = self._pack_init_trajectory_guess(init_trajectory_guess)
 
