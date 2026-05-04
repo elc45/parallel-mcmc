@@ -1,4 +1,5 @@
 import jax
+from numpy import False_
 
 jax.config.update("jax_enable_x64", True)
 jax.config.update("jax_default_matmul_precision", "highest")
@@ -35,16 +36,17 @@ def target_log_prob(x):
     fldj = target.default_event_space_bijector.forward_log_det_jacobian(x)
     return target.unnormalized_log_prob(y) + fldj
 
-chain_length = 1000
+chain_length = 500
 key = jr.PRNGKey(1234)
 key, skey = jr.split(key)
 initial_state = 0. + 10. * jr.normal(skey, (D,))
-max_iter = chain_length + 10
+max_iter = chain_length
 damp_factor = 0.55
 tol = 1e-4
 rtol = 1e-4
-adaptive_mass = "grad"
-quasi = True
+adaptive_mass = "draw-only"
+quasi = False
+qmem_efficient = False
 
 params = {}
 params["epsilon"] = 0.5
@@ -53,7 +55,7 @@ params["num_leapfrog_steps"] = 8
 # "draw-only": M_ii = var(draw) + cov_jitter (3D+1 packed). "grad": sqrt(var_draw/var_grad)+λ (5D+1).
 sampler = samplers.ParallelHMC(target_log_prob, D, chain_length, max_iter,
     full_trace=False, damp_factor=damp_factor, show_progress=_SHOW_DEER_PROGRESS, 
-    tol=tol, rtol=rtol, adaptive_mass=adaptive_mass, quasi=quasi)
+    tol=tol, rtol=rtol, adaptive_mass=adaptive_mass, quasi=quasi, qmem_efficient=qmem_efficient)
 
 run_sequential = jax.jit(sampler.run_sequential_hmc)
 run_parallel = jax.jit(sampler.run_parallel_hmc)
@@ -78,6 +80,7 @@ sampler = samplers.ParallelHMC(
     tol=tol,
     rtol=rtol,
     adaptive_mass=adaptive_mass,
+    qmem_efficient=qmem_efficient,
 )
 
 print("Re-running parallel HMC with full trace for visualization")

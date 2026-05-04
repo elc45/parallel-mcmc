@@ -66,27 +66,8 @@ def _pack_draw_only(position, count, mean, m2_diag):
     return jnp.concatenate([position, count[None], mean, m2_diag])
 
 
-def _unpack_adaptive_state(packed: jnp.ndarray, D: int):
-    """Unpack the packed state x into the constituent parts: position, count, mean_draw, m2_draw, mean_grad, m2_grad.
-    Args:
-        packed: jnp.ndarray
-            The packed state x.
-        D: int
-            The dimension of the parameter space.
-    Returns:
-        position: jnp.ndarray
-            The draws.
-        count: jnp.ndarray
-            The count of the draws at each iteration.
-        mean_draw: jnp.ndarray
-            The estimated Welford mean of the draws at each iteration.
-        m2_draw: jnp.ndarray
-            The estimated Welford second moment of the draws at each iteration.
-        mean_grad: jnp.ndarray
-            The estimated Welford mean of the gradients at each iteration.
-        m2_grad: jnp.ndarray
-            The estimated Welford second moment of the gradients at each iteration.
-    """
+def _unpack_grad_adaptive_state(packed: jnp.ndarray, D: int):
+    """Unpack ``grad`` layout: position, count, draw Welford, grad Welford (packed dim ``5D+1``)."""
     position = packed[:D]
     count = packed[D]
     mean_draw = packed[D + 1 : 2 * D + 1]
@@ -105,23 +86,8 @@ def _unpack_draw_only_trajectory(packed: jnp.ndarray, D: int):
     return position, count, mean, m2_diag
 
 
-def _unpack_adaptive_state_trajectory(packed: jnp.ndarray, D: int):
-    """Unpack many packed adaptive states; layout matches `_unpack_adaptive_state` (grad mode).
-
-    Args:
-        packed: jnp.ndarray
-            Shape ``(..., 5 * D + 1)``: one packed state per leading batch / time index.
-        D: int
-            Parameter dimension.
-
-    Returns:
-        position: jnp.ndarray, shape ``(..., D)``
-        count: jnp.ndarray, shape ``(...)``
-        mean_draw: jnp.ndarray, shape ``(..., D)``
-        m2_draw: jnp.ndarray, shape ``(..., D)``
-        mean_grad: jnp.ndarray, shape ``(..., D)``
-        m2_grad: jnp.ndarray, shape ``(..., D)``
-    """
+def _unpack_grad_adaptive_state_trajectory(packed: jnp.ndarray, D: int):
+    """Like `_unpack_grad_adaptive_state` but last axis is packed state ``(..., 5 * D + 1)``."""
     position = packed[..., :D]
     count = packed[..., D]
     mean_draw = packed[..., D + 1 : 2 * D + 1]
@@ -172,19 +138,19 @@ def _variance_diag_from_welford(count: jnp.ndarray, m2_diag: jnp.ndarray) -> jnp
     )
 
 
-def _mass_diag_identity_regularized(variance_diag: jnp.ndarray, lam: float) -> jnp.ndarray:
-    """Diagonal mass M = diag(var_hat) + λ I, i.e. M_ii = variance_i + λ."""
-    return variance_diag + lam
-
-
-def _mass_matrix_update(
+def _adaptive_mass_diag(
+    mode: Literal["draw-only", "grad"],
     draw_var: jnp.ndarray,
-    grad_var: jnp.ndarray,
     count: jnp.ndarray,
     lam: float,
+    grad_var: jnp.ndarray | None = None,
     eps: float = 1e-8,
 ) -> jnp.ndarray:
-    """M_ii = sqrt(draw_var_i / grad_var_i) + λ; identity scaling until count > 1."""
+    """Diagonal mass from Welford variances: draw-only uses var+λ; grad uses sqrt(var_draw/var_grad)+λ."""
+    if mode == "draw-only":
+        return draw_var + lam
+    if grad_var is None:
+        raise ValueError("grad_var is required when mode is 'grad'")
     eps_arr = jnp.array(eps, dtype=draw_var.dtype)
     ratio = jnp.where(
         count > 1.0,
@@ -203,125 +169,6 @@ def _kinetic_diag_mass(p: jnp.ndarray, mass_diag: jnp.ndarray) -> jnp.ndarray:
     """K = 1/2 sum_i p_i^2 / M_ii for diagonal mass M."""
     return 0.5 * jnp.sum((p**2) / mass_diag)
 
-class ParallelMALA:
-    
-    # our constructor
-    def __init__(self, log_prob, dim, chain_length, max_iter, alg="quasi",
-                 clip_val=1.0, damp_factor=1.0, full_trace=False, 
-                 basis_transformation=False, window_size=None):
-        '''
-        Args:
-            logp - unnormalized log-posterior function that ONLY takes in theta as argument. Use partial.
-            dim - how many dimensions is our parameter space for sampling? (added together)
-            epsilon - the MALA stepsize.
-            quasi - are we taking diagonal or full Jacobian?
-            qmem_efficient - are we using the Hutchinson's estimator?
-            clip_val - what are we clipping individual gradient entries to in absolute value?
-            damp_factor - slightly damping the Jacobian.
-        '''
-        # 1. internalize + get the target log-prob and grad
-        self.log_prob = log_prob
-        self.D = dim
-        self.chain_length = chain_length
-        self.target_log_prob_and_grad = jax.value_and_grad(self.log_prob)
-        self.max_iter = max_iter
-        self.alg = alg 
-        self.clip_val = clip_val
-        self.damp_factor = damp_factor
-        self.full_trace = full_trace 
-        self.basis_transformation = basis_transformation
-        self.window_size = window_size
-        if self.window_size is not None:
-            assert 1 <= self.window_size <= self.chain_length
-        
-    def mala_fn_for_seq(self, state, driver, params):
-        step_size = params["step_size"]
-        key, *skeys = jr.split(driver, 3)
-
-        logprob_state, grad_state = self.target_log_prob_and_grad(state, params["target_params"])
-        next_state = state + step_size * grad_state # grad_logp is previously defined score function (todo: have it take in params)
-        next_state = next_state + jnp.sqrt(2.0 * step_size) * jr.normal(skeys[0], (state.shape[0],))
-
-        # get new log prob and grad
-        logprob_nextstate, grad_nextstate = self.target_log_prob_and_grad(next_state, params["target_params"])
-
-        # accept / reject
-        num = logprob_nextstate + tfd.MultivariateNormalDiag(
-            loc=next_state+step_size * grad_nextstate,
-            scale_diag=jnp.sqrt(2.0 * step_size) * jnp.ones_like(state)).log_prob(
-                state)
-        den = logprob_state + tfd.MultivariateNormalDiag(
-            loc=state+step_size * grad_state,
-            scale_diag=jnp.sqrt(2.0 * step_size) * jnp.ones_like(state)).log_prob(
-                next_state)
-        g = sigmoid_accept(num-den-jnp.log(jr.uniform(skeys[1])))
-        next_state = g*next_state + (1.0-g)*state
-
-        return next_state
-
-    def mala_fn_for_deer(self, state, driver, params):
-        # if transform basis, do initial transformation (assume orthogonal)
-        if self.basis_transformation:
-            state = params["basis"] @ state 
-
-        # then run seq update
-        next_state = self.mala_fn_for_seq(state, driver, params)
-
-        # transform reverse
-        if self.basis_transformation:
-            next_state = params["basis"].T @ next_state
-
-        return next_state
-
-    def run_parallel_mala(self, key, initial_state, yinit_guess, params):
-        drivers = jr.split(key, (self.chain_length,))
-
-        if self.basis_transformation:
-            initial_state = params["basis"].T @ initial_state 
-            yinit_guess = jnp.einsum('...ij, ...j -> ...i', params["basis"].T, yinit_guess)
-
-        out_states, iters = deer.seq1d(
-            self.mala_fn_for_deer, initial_state, drivers, params,
-            yinit_guess=yinit_guess, max_iter=self.max_iter, clip_val=self.clip_val,
-            full_trace=self.full_trace, damp_factor=self.damp_factor,
-            quasi=True, qmem_efficient=True,
-        )
-
-        if self.basis_transformation:
-            out_states = jnp.einsum('...ij, ...j -> ...i', params["basis"], out_states)
-
-        return out_states, iters 
-
-    def run_parallel_mala_window(self, key, initial_state, yinit_guess, params):
-        drivers = jr.split(key, (self.chain_length,))
-
-        if self.basis_transformation:
-            initial_state = params["basis"].T @ initial_state 
-            yinit_guess = jnp.einsum('...ij, ...j -> ...i', params["basis"].T, yinit_guess)
-
-        out_states, iters = windowed_qdeer.seq1d(
-            self.mala_fn_for_deer, initial_state, drivers, params, self.window_size,
-            yinit_guess=yinit_guess, max_iter=self.max_iter, clip_val=self.clip_val,
-            full_trace=self.full_trace, damp_factor=self.damp_factor
-        )
-
-        if self.basis_transformation:
-            out_states = jnp.einsum('...ij, ...j -> ...i', params["basis"], out_states)
-
-        return out_states, iters 
-
-    def run_sequential_mala(self, key, initial_state, params):
-
-        def _fn_for_scan(state, driver):
-            state = self.mala_fn_for_seq(state, driver, params)
-            return state, state 
-
-        drivers = jr.split(key, (self.chain_length,))
-        _, out_states = jax.lax.scan(_fn_for_scan, initial_state, drivers)
-
-        return out_states
-
-
 class ParallelHMC:
     log_prob: Callable
     D: int
@@ -329,6 +176,7 @@ class ParallelHMC:
     max_iter: int
     alg: str
     quasi: bool
+    qmem_efficient: bool
     clip_val: float
     damp_factor: float
     full_trace: bool
@@ -348,6 +196,7 @@ class ParallelHMC:
                 max_iter: int, 
                 alg: str = "quasi",
                 quasi: bool = True,
+                qmem_efficient: bool = False,
                 clip_val: float = 1.0, 
                 damp_factor: float = 1.0, 
                 full_trace: bool = False, 
@@ -367,6 +216,10 @@ class ParallelHMC:
             alg                - DEER variant to use (default "quasi").
             quasi              - if True, use diagonal (quasi-Newton) Jacobians; if False, use full
                                  Jacobians (default True).
+            qmem_efficient     - passed to ``deer.seq1d`` when ``quasi`` is True: if True, estimate
+                                 the diagonal Jacobian with a Rademacher Hutchinson estimator (then
+                                 ``params`` must include a PRNGKey under ``\"key\"``); if False,
+                                 use ``jnp.diag(jacfwd(...))`` (default False).
             clip_val           - gradient entries are clipped to [-clip_val, clip_val] before the
                                  Newton update (default 1.0).
             damp_factor        - damping coefficient applied to the Jacobian in the Newton step
@@ -396,6 +249,7 @@ class ParallelHMC:
         self.max_iter = max_iter
         self.alg = alg
         self.quasi = quasi
+        self.qmem_efficient = qmem_efficient
         self.clip_val = clip_val
         self.damp_factor = damp_factor
         self.full_trace = full_trace 
@@ -444,7 +298,7 @@ class ParallelHMC:
         """Expand an initial (T, D) trajectory guess to (T, chain_state_dim) with Welford slots."""
         T, D = y_positions.shape
         dtype = y_positions.dtype
-        count = jnp.zeros((T, 1), dtype=dtype)
+        count = jnp.arange(1, T + 1, dtype=dtype)[:, None]
         if self.adaptive_mass == "draw-only":
             means = jnp.zeros((T, D), dtype=dtype)
             m2s = jnp.zeros((T, D), dtype=dtype)
@@ -461,60 +315,47 @@ class ParallelHMC:
         """Take leading D dims when adaptive; pass-through shape-safe when not."""
         return states[..., : self.D]
 
-    def _hmc_adaptive_mass_draw_only(self, packed_state: jnp.ndarray, driver, params):
-        """One HMC step with M_ii = Welford var(draw)_i + λ (fixed in trajectory)."""
+    def _unpack_adaptive_state(self, packed: jnp.ndarray):
+        """Unpack packed chain state; slice layout follows ``self.adaptive_mass``."""
+        assert self.adaptive_mass is not None
+        D = self.D
+        if self.adaptive_mass == "draw-only":
+            return _unpack_draw_only(packed, D)
+        return _unpack_grad_adaptive_state(packed, D)
+
+    def _unpack_adaptive_state_trajectory(self, packed: jnp.ndarray):
+        """Unpack batch/trajectory of packed states (last axis packed); layout from ``self.adaptive_mass``."""
+        assert self.adaptive_mass is not None
+        D = self.D
+        if self.adaptive_mass == "draw-only":
+            return _unpack_draw_only_trajectory(packed, D)
+        return _unpack_grad_adaptive_state_trajectory(packed, D)
+
+    def _hmc_adaptive_mass(self, packed_state: jnp.ndarray, driver, params):
+        """One HMC step with diagonal adaptive mass (draw-only or draw/score ratio); packed layout set by mode."""
         D = self.D
         step_size = params["epsilon"]
         num_steps = params["num_leapfrog_steps"]
         seed = driver
+        mode = self.adaptive_mass
+        assert mode is not None
 
-        position, count, mean, m2_diag = _unpack_draw_only(packed_state, D)
-        variance_diag = _variance_diag_from_welford(count, m2_diag)
-        mass_diag = _mass_diag_identity_regularized(variance_diag, self.cov_jitter)
+        unpacked = self._unpack_adaptive_state(packed_state)
+        if mode == "draw-only":
+            position, count, mean_draw, m2_draw = unpacked
+        else:
+            position, count, mean_draw, m2_draw, mean_grad, m2_grad = unpacked
 
-        momentum_seed, mh_seed = jr.split(seed)
-        momentum = _sample_momentum_diag_mass(mass_diag, momentum_seed, (D,))
-        tlp, tlp_grad = self.target_log_prob_and_grad(position)
-        energy = _kinetic_diag_mass(momentum, mass_diag) - tlp
-
-        momentum = momentum + 0.5 * step_size * tlp_grad
-
-        zm = jnp.concatenate((position, momentum))
-        zm = jax.lax.fori_loop(
-            0,
-            num_steps,
-            lambda _, s: self._scan_leapfrog_diag_mass(s, step_size, mass_diag),
-            zm,
-        )
-        new_position, new_momentum = jnp.split(zm, 2)
-        new_tlp, new_tlp_grad = self.target_log_prob_and_grad(new_position)
-        new_momentum = new_momentum - 0.5 * step_size * new_tlp_grad
-
-        new_energy = _kinetic_diag_mass(new_momentum, mass_diag) - new_tlp
-        log_accept_ratio = energy - new_energy
-
-        u = jr.uniform(mh_seed, [])
-        g = sigmoid_accept(log_accept_ratio - jnp.log(u))
-        new_position = g * new_position + (1.0 - g) * position
-
-        count_n, mean_n, m2_n = _welford_update_diag(count, mean, m2_diag, new_position)
-        return _pack_draw_only(new_position, count_n, mean_n, m2_n)
-
-    def _hmc_adaptive_mass_grad(self, packed_state: jnp.ndarray, driver, params):
-        """One HMC step with M_ii = sqrt(Welford var(draw)_i / var(score)_i) + λ (fixed in trajectory)."""
-        D = self.D
-        step_size = params["epsilon"]
-        num_steps = params["num_leapfrog_steps"]
-        seed = driver
-
-        position, count, mean_draw, m2_draw, mean_grad, m2_grad = _unpack_adaptive_state(
-            packed_state, D
-        )
         draw_var = _variance_diag_from_welford(count, m2_draw)
-        grad_var = _variance_diag_from_welford(count, m2_grad)
-        mass_diag = _mass_matrix_update(
-            draw_var, grad_var, count, self.cov_jitter
-        )
+        if mode == "draw-only":
+            mass_diag = _adaptive_mass_diag(
+                "draw-only", draw_var, count, self.cov_jitter
+            )
+        else:
+            grad_var = _variance_diag_from_welford(count, m2_grad)
+            mass_diag = _adaptive_mass_diag(
+                "grad", draw_var, count, self.cov_jitter, grad_var=grad_var
+            )
 
         momentum_seed, mh_seed = jr.split(seed)
         momentum = _sample_momentum_diag_mass(mass_diag, momentum_seed, (D,))
@@ -540,8 +381,14 @@ class ParallelHMC:
         u = jr.uniform(mh_seed, [])
         g = sigmoid_accept(log_accept_ratio - jnp.log(u))
         new_position = g * new_position + (1.0 - g) * position
-        grad_chain = g * new_tlp_grad + (1.0 - g) * tlp_grad
 
+        if mode == "draw-only":
+            count_n, mean_n, m2_n = _welford_update_diag(
+                count, mean_draw, m2_draw, new_position
+            )
+            return _pack_draw_only(new_position, count_n, mean_n, m2_n)
+
+        grad_chain = g * new_tlp_grad + (1.0 - g) * tlp_grad
         count_n, mean_draw_n, m2_draw_n = _welford_update_diag(
             count, mean_draw, m2_draw, new_position
         )
@@ -553,10 +400,8 @@ class ParallelHMC:
         )
 
     def hmc_fn_for_deer(self, state, driver, params):
-        if self.adaptive_mass == "grad":
-            return self._hmc_adaptive_mass_grad(state, driver, params)
-        if self.adaptive_mass == "draw-only":
-            return self._hmc_adaptive_mass_draw_only(state, driver, params)
+        if self.adaptive_mass is not None:
+            return self._hmc_adaptive_mass(state, driver, params)
 
         seed = driver
         position = state 
@@ -627,7 +472,7 @@ class ParallelHMC:
             init_trajectory_guess=init_trajectory_guess, 
             max_iter=self.max_iter, 
             quasi=self.quasi, 
-            qmem_efficient=False, 
+            qmem_efficient=self.qmem_efficient, 
             clip_val=self.clip_val,
             full_trace=self.full_trace, 
             damp_factor=self.damp_factor,
