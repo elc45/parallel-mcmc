@@ -77,26 +77,6 @@ def _unpack_grad_adaptive_state(packed: jnp.ndarray, D: int):
     return position, count, mean_draw, m2_draw, mean_grad, m2_grad
 
 
-def _unpack_draw_only_trajectory(packed: jnp.ndarray, D: int):
-    """Like `_unpack_draw_only` but last axis is packed state ``(..., 3 * D + 1)``."""
-    position = packed[..., :D]
-    count = packed[..., D]
-    mean = packed[..., D + 1 : 2 * D + 1]
-    m2_diag = packed[..., 2 * D + 1 :]
-    return position, count, mean, m2_diag
-
-
-def _unpack_grad_adaptive_state_trajectory(packed: jnp.ndarray, D: int):
-    """Like `_unpack_grad_adaptive_state` but last axis is packed state ``(..., 5 * D + 1)``."""
-    position = packed[..., :D]
-    count = packed[..., D]
-    mean_draw = packed[..., D + 1 : 2 * D + 1]
-    m2_draw = packed[..., 2 * D + 1 : 3 * D + 1]
-    mean_grad = packed[..., 3 * D + 1 : 4 * D + 1]
-    m2_grad = packed[..., 4 * D + 1 :]
-    return position, count, mean_draw, m2_draw, mean_grad, m2_grad
-
-
 def _pack_adaptive_state(position, count, mean_draw, m2_draw, mean_grad, m2_grad):
     """Pack the constituent parts into a packed state x.
     Args:
@@ -322,14 +302,6 @@ class ParallelHMC:
         if self.adaptive_mass == "draw-only":
             return _unpack_draw_only(packed, D)
         return _unpack_grad_adaptive_state(packed, D)
-
-    def _unpack_adaptive_state_trajectory(self, packed: jnp.ndarray):
-        """Unpack batch/trajectory of packed states (last axis packed); layout from ``self.adaptive_mass``."""
-        assert self.adaptive_mass is not None
-        D = self.D
-        if self.adaptive_mass == "draw-only":
-            return _unpack_draw_only_trajectory(packed, D)
-        return _unpack_grad_adaptive_state_trajectory(packed, D)
 
     def _hmc_adaptive_mass(self, packed_state: jnp.ndarray, driver, params):
         """One HMC step with diagonal adaptive mass (draw-only or draw/score ratio); packed layout set by mode."""

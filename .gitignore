@@ -6,3 +6,5 @@ examples/hmc_runs/.DS_Store
 *.npy
 *.png
 hmc_runs/
+*.DS_Store
+examples/run_hmc_rosenbrock_config.json

@@ -59,9 +59,9 @@ def newton_max_error_plot(
     else:
         fig = ax.figure
 
-    ax.plot(iters, errors, marker="o", ms=3, lw=1.2)
+    ax.plot(iters, jnp.log(errors), marker="o", ms=3, lw=1.2)
     ax.set_xlabel("Newton iteration", fontsize=12)
-    ax.set_ylabel(r"$\max \; |\Delta Y| - \mathrm{rtol}\,|Y_{\mathrm{prev}}|$", fontsize=11)
+    ax.set_ylabel(r"log($\max \; |\Delta Y| - \mathrm{rtol}\,|Y_{\mathrm{prev}}|$)", fontsize=11)
     if title is not None:
         ax.set_title(title, fontsize=12)
     ax.grid(True, alpha=0.35)
@@ -156,7 +156,7 @@ def progress_plot(
         axes_flat[j].set_visible(False)
 
     if suptitle is None:
-        suptitle = f"{chain_length} HMC Samples, quasi={quasi}"
+        suptitle = f"{chain_length} HMC draws"
     fig.suptitle(suptitle, fontsize=16, fontweight="bold")
     fig.tight_layout()
     if savepath is not None:

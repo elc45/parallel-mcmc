@@ -124,8 +124,8 @@ if __name__ == "__main__":
     run_dir.mkdir(parents=False)
     shutil.copy2(CONFIG_PATH, run_dir / CONFIG_PATH.name)
 
-    plot_progress = run_dir / f"hmc_{target.name}_adapt-{adaptive_mass}_quasi-{quasi}-2.png"
-    plot_newton = run_dir / f"hmc_{target.name}_adapt-{adaptive_mass}_quasi-{quasi}_newton_err.png"
+    plot_progress = run_dir / "progress.png"
+    plot_newton = run_dir / "newton_err.png"
 
     hmc_plot.progress_plot(
         states_par,
