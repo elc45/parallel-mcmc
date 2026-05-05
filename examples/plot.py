@@ -10,6 +10,36 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+
+def _welford_variance(count: int, m2_diag: np.ndarray) -> np.ndarray:
+    """Unbiased sample variance per coordinate; zero when count <= 1."""
+    m2_diag = np.asarray(m2_diag)
+    if count > 1:
+        return m2_diag / (count - 1)
+    return np.zeros_like(m2_diag)
+
+
+def _fig_to_rgb_array(fig: plt.Figure) -> np.ndarray:
+    """Render *fig* to an RGB uint8 array, handling HiDPI/Retina displays.
+
+    ``get_width_height()`` returns logical pixels; ``buffer_rgba()`` returns
+    physical pixels.  We recover the true (h, w) from the buffer length and
+    the known aspect ratio.
+    """
+    fig.canvas.draw()
+    buf = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8)
+    w_log, h_log = fig.canvas.get_width_height()
+    n_pixels = len(buf) // 4
+    # h_phys / w_phys == h_log / w_log  and  h_phys * w_phys == n_pixels
+    h_phys = int(round((n_pixels * h_log / w_log) ** 0.5))
+    w_phys = n_pixels // h_phys
+    return buf.reshape(h_phys, w_phys, 4)[..., :3]
+
+
 def newton_max_errors(states_par: jnp.ndarray, rtol: float | None = None) -> jnp.ndarray:
     """Scalar DEER-style error per Newton step (matches ``deer.deer_iteration_helper.scan_func``).
 
@@ -162,3 +192,94 @@ def progress_plot(
     if savepath is not None:
         fig.savefig(savepath, dpi=150, bbox_inches="tight")
     return fig
+
+
+def mass_matrix_convergence_gif(
+    m2_draw: np.ndarray,
+    savepath: Path | str,
+    *,
+    step: int = 5,
+    duration: float = 0.005,
+) -> None:
+    """Animated GIF of mass-matrix diagonal variance converging across Newton iterations.
+
+    Parameters
+    ----------
+    m2_draw
+        Welford M2 accumulator for draws, shape ``(num_newton_iters, chain_length, D)``.
+        ``m2_draw[k, i, d]`` is the running sum-of-squared-deviations for dimension ``d``
+        after ``i`` chain steps at Newton iteration ``k``.
+    savepath
+        Output path for the GIF file.
+    step
+        Sample every ``step`` Newton iterations for animation frames.
+    duration
+        Frame duration in seconds passed to ``imageio.mimsave``.
+    """
+    import imageio
+
+    m2_draw = np.asarray(m2_draw)
+    num_newton_iters, chain_length, D = m2_draw.shape
+    gif_frames = []
+
+    for newt_iter in range(0, num_newton_iters, step):
+        m2s = m2_draw[newt_iter]  # (chain_length, D)
+        variance_diag = np.stack([_welford_variance(i, m2s[i]) for i in range(chain_length)])
+
+        fig, ax = plt.subplots()
+        for d in range(D):
+            ax.plot(np.sign(variance_diag[:, d]) * np.log1p(np.abs(variance_diag[:, d])), label=f"dim {d}")
+        ax.set_title(f"Mass matrix variance (Newton iter={newt_iter})")
+        ax.set_xlabel("Markov Chain Iteration")
+        ax.set_ylabel("Variance")
+        ax.legend()
+        fig.tight_layout()
+
+        gif_frames.append(_fig_to_rgb_array(fig))
+        plt.close(fig)
+
+    imageio.mimsave(savepath, gif_frames, duration=duration, loop=0)
+
+
+def position_convergence_gif(
+    position: np.ndarray,
+    savepath: Path | str,
+    *,
+    step: int = 10,
+    duration: float = 0.005,
+) -> None:
+    """Animated GIF of chain position traces converging across Newton iterations.
+
+    Parameters
+    ----------
+    position
+        Position array, shape ``(num_newton_iters, chain_length, D)``.
+    savepath
+        Output path for the GIF file.
+    step
+        Sample every ``step`` Newton iterations for animation frames.
+    duration
+        Frame duration in seconds passed to ``imageio.mimsave``.
+    """
+    import imageio
+
+    position = np.asarray(position)
+    num_newton_iters, chain_length, D = position.shape
+    gif_frames = []
+
+    for newt_iter in range(0, num_newton_iters, step):
+        positions = position[newt_iter]  # (chain_length, D)
+
+        fig, ax = plt.subplots()
+        for d in range(D):
+            ax.plot(np.sign(positions[:, d]) * np.log1p(np.abs(positions[:, d])), label=f"dim {d}")
+        ax.set_title(f"Position trace (Newton iter={newt_iter})")
+        ax.set_xlabel("Markov Chain Iteration")
+        ax.set_ylabel("Value")
+        ax.legend()
+        fig.tight_layout()
+
+        gif_frames.append(_fig_to_rgb_array(fig))
+        plt.close(fig)
+
+    imageio.mimsave(savepath, gif_frames, duration=duration, loop=0)

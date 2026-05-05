@@ -7,6 +7,7 @@ import jax.numpy as jnp
 import jax.random as jr
 import numpy as np
 from src import samplers
+from src.util import unpack_adaptive_state_trajectory
 
 import plot as hmc_plot
 from inference_gym import using_jax as gym
@@ -143,5 +144,27 @@ if __name__ == "__main__":
         title=f"DEER Newton error ({target.name})",
     )
 
-    np.save(run_dir / "states_par.npy", np.asarray(jax.device_get(states_par)))
-    print(f"Saved config, plots, and states_par.npy under {run_dir}")
+    states_par_np = np.asarray(jax.device_get(states_par))
+    np.save(run_dir / "states_par.npy", states_par_np)
+
+    print("Creating GIFs...")
+    adaptive_mass_mode = samplers._normalize_adaptive_mass(adaptive_mass)
+    if adaptive_mass_mode is not None:
+        unpacked = unpack_adaptive_state_trajectory(states_par_np, D, adaptive_mass_mode)
+        position_arr = unpacked[0]
+        m2_arr = unpacked[3]
+        hmc_plot.mass_matrix_convergence_gif(
+            m2_arr,
+            run_dir / "mass_matrix_trace.gif",
+        )
+        hmc_plot.position_convergence_gif(
+            position_arr,
+            run_dir / "trace.gif",
+        )
+    else:
+        hmc_plot.position_convergence_gif(
+            states_par_np,
+            run_dir / "trace.gif",
+        )
+
+    print(f"Saved config, plots, states_par.npy, and GIFs under {run_dir}")
