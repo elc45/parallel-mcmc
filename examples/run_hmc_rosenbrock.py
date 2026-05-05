@@ -1,31 +1,48 @@
+import json
+import shutil
+from pathlib import Path
+
 import jax
-from numpy import False_
-
-jax.config.update("jax_enable_x64", True)
-jax.config.update("jax_default_matmul_precision", "highest")
-
 import jax.numpy as jnp
 import jax.random as jr
+import numpy as np
 from src import samplers
-from pathlib import Path
 
 import plot as hmc_plot
 from inference_gym import using_jax as gym
 from tensorflow_probability.substrates import jax as tfp
+
+jax.config.update("jax_enable_x64", True)
+jax.config.update("jax_default_matmul_precision", "highest")
+
 tfd = tfp.distributions
 
-PLOT_DIR = Path(__file__).resolve().parent / "plots"
-PLOT_DIR.mkdir(parents=True, exist_ok=True)
+_EXAMPLES_DIR = Path(__file__).resolve().parent
+CONFIG_PATH = _EXAMPLES_DIR / "run_hmc_rosenbrock_config.json"
+RUNS_PARENT = _EXAMPLES_DIR / "hmc_runs"
 
 _SHOW_DEER_PROGRESS = __name__ == "__main__"
+
+
+def _next_run_dir(runs_parent: Path) -> Path:
+    runs_parent.mkdir(parents=True, exist_ok=True)
+    max_n = 0
+    for p in runs_parent.iterdir():
+        if p.is_dir() and p.name.isdigit():
+            max_n = max(max_n, int(p.name))
+    return runs_parent / str(max_n + 1)
+
 
 # target = gym.targets.VectorModel(gym.targets.Banana(curvature=0.05),
 #                                   flatten_sample_transformations=True)
 
-target = gym.targets.VectorModel(gym.targets.IllConditionedGaussian(ndims=2, seed=123),
-                                flatten_sample_transformations=True)
+target = gym.targets.VectorModel(
+    gym.targets.IllConditionedGaussian(ndims=2, seed=123),
+    flatten_sample_transformations=True,
+)
 
 D = target.event_shape[0]
+
 
 def target_log_prob(x):
     """Unnormalized, unconstrained target density.
@@ -36,26 +53,41 @@ def target_log_prob(x):
     fldj = target.default_event_space_bijector.forward_log_det_jacobian(x)
     return target.unnormalized_log_prob(y) + fldj
 
-chain_length = 500
-key = jr.PRNGKey(1234)
+
+with open(CONFIG_PATH) as f:
+    cfg = json.load(f)
+
+chain_length = cfg["chain_length"]
+key = jr.PRNGKey(cfg["random_seed"])
 key, skey = jr.split(key)
-initial_state = 0. + 10. * jr.normal(skey, (D,))
+initial_state = 0.0 + float(cfg["initial_state_scale"]) * jr.normal(skey, (D,))
 max_iter = chain_length
-damp_factor = 0.55
-tol = 1e-4
-rtol = 1e-4
-adaptive_mass = "draw-only"
-quasi = False
-qmem_efficient = False
+damp_factor = float(cfg["damp_factor"])
+tol = float(cfg["tol"])
+rtol = float(cfg["rtol"])
+adaptive_mass = cfg["adaptive_mass"]
+quasi = bool(cfg["quasi"])
+qmem_efficient = bool(cfg["qmem_efficient"])
 
 params = {}
 params["epsilon"] = 0.5
 params["num_leapfrog_steps"] = 8
 
 # "draw-only": M_ii = var(draw) + cov_jitter (3D+1 packed). "grad": sqrt(var_draw/var_grad)+λ (5D+1).
-sampler = samplers.ParallelHMC(target_log_prob, D, chain_length, max_iter,
-    full_trace=False, damp_factor=damp_factor, show_progress=_SHOW_DEER_PROGRESS, 
-    tol=tol, rtol=rtol, adaptive_mass=adaptive_mass, quasi=quasi, qmem_efficient=qmem_efficient)
+sampler = samplers.ParallelHMC(
+    target_log_prob,
+    D,
+    chain_length,
+    max_iter,
+    full_trace=False,
+    damp_factor=damp_factor,
+    show_progress=_SHOW_DEER_PROGRESS,
+    tol=tol,
+    rtol=rtol,
+    adaptive_mass=adaptive_mass,
+    quasi=quasi,
+    qmem_efficient=qmem_efficient,
+)
 
 run_sequential = jax.jit(sampler.run_sequential_hmc)
 run_parallel = jax.jit(sampler.run_parallel_hmc)
@@ -87,18 +119,29 @@ print("Re-running parallel HMC with full trace for visualization")
 run_parallel = jax.jit(sampler.run_parallel_hmc)
 states_par, iters = run_parallel(key, initial_state, init_trajectory_guess, params)
 
-hmc_plot.progress_plot(
-    states_par,
-    states_seq,
-    initial_state,
-    [1, 10, 25, max_iter],
-    chain_length=chain_length,
-    quasi=quasi,
-    savepath=PLOT_DIR / f"hmc_{target.name}_adapt-{adaptive_mass}_quasi-{quasi}-2.png",
-)
-hmc_plot.newton_max_error_plot(
-    states_par,
-    rtol=rtol,
-    savepath=PLOT_DIR / f"hmc_{target.name}_adapt-{adaptive_mass}_quasi-{quasi}_newton_err.png",
-    title=f"DEER Newton error ({target.name})",
-)
+if __name__ == "__main__":
+    run_dir = _next_run_dir(RUNS_PARENT)
+    run_dir.mkdir(parents=False)
+    shutil.copy2(CONFIG_PATH, run_dir / CONFIG_PATH.name)
+
+    plot_progress = run_dir / f"hmc_{target.name}_adapt-{adaptive_mass}_quasi-{quasi}-2.png"
+    plot_newton = run_dir / f"hmc_{target.name}_adapt-{adaptive_mass}_quasi-{quasi}_newton_err.png"
+
+    hmc_plot.progress_plot(
+        states_par,
+        states_seq,
+        initial_state,
+        [1, 10, 25, max_iter],
+        chain_length=chain_length,
+        quasi=quasi,
+        savepath=plot_progress,
+    )
+    hmc_plot.newton_max_error_plot(
+        states_par,
+        rtol=rtol,
+        savepath=plot_newton,
+        title=f"DEER Newton error ({target.name})",
+    )
+
+    np.save(run_dir / "states_par.npy", np.asarray(jax.device_get(states_par)))
+    print(f"Saved config, plots, and states_par.npy under {run_dir}")

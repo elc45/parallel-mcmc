@@ -2,3 +2,7 @@
 parallel_mcmc.egg-info/
 examples/plots/
 sandbox.ipynb
+examples/hmc_runs/.DS_Store
+*.npy
+*.png
+hmc_runs/
