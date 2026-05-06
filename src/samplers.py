@@ -134,26 +134,36 @@ def _sqrt_nonneg_jvp(primals, tangents):
     return y, inv_slope * dx
 
 
+_MASS_LOWER: float = 1e-20
+_MASS_UPPER: float = 1e20
+
+
 def _adaptive_mass_diag(
     mode: Literal["draw-only", "grad"],
     draw_var: jnp.ndarray,
-    count: jnp.ndarray,
-    lam: float,
     grad_var: jnp.ndarray | None = None,
-    eps: float = 1e-8,
+    fill_invalid: float = 1.0,
+    clamp: tuple[float, float] = (_MASS_LOWER, _MASS_UPPER),
 ) -> jnp.ndarray:
-    """Diagonal mass from Welford variances: draw-only uses var+λ; grad uses sqrt(var_draw/var_grad)+λ."""
+    """Diagonal mass from Welford variances.
+
+    draw-only: mass = draw_var
+    grad:      mass = sqrt(draw_var / grad_var)
+
+    Non-finite or zero entries are replaced with fill_invalid (default 1.0),
+    then the result is clamped to [clamp[0], clamp[1]].
+    """
     if mode == "draw-only":
-        return draw_var + lam
-    if grad_var is None:
-        raise ValueError("grad_var is required when mode is 'grad'")
-    eps_arr = jnp.array(eps, dtype=draw_var.dtype)
-    ratio = jnp.where(
-        count > 1.0,
-        draw_var / jnp.maximum(grad_var, eps_arr),
-        jnp.ones_like(draw_var),
+        val = draw_var
+    else:
+        if grad_var is None:
+            raise ValueError("grad_var is required when mode is 'grad'")
+        val = _sqrt_nonneg(draw_var / grad_var)
+    return jnp.where(
+        jnp.isfinite(val) & (val > 0.0),
+        jnp.clip(val, clamp[0], clamp[1]),
+        fill_invalid,
     )
-    return _sqrt_nonneg(ratio) + lam
 
 
 def _sample_momentum_diag_mass(mass_diag: jnp.ndarray, key, shape):
@@ -181,7 +191,6 @@ class ParallelHMC:
     tol: float | None
     rtol: float | None
     adaptive_mass: Literal["grad", "draw-only"] | None
-    cov_jitter: float
     chain_state_dim: int
     target_log_prob_and_grad: Callable
 
@@ -200,8 +209,7 @@ class ParallelHMC:
                 show_progress: bool = False, 
                 tol: float | None = None, 
                 rtol: float | None = None,
-                adaptive_mass: str | bool | None = None,
-                cov_jitter: float = 1.0):
+                adaptive_mass: str | bool | None = None):
         '''
         Args:
             log_prob           - unnormalized log-posterior callable; must accept only the position
@@ -230,13 +238,12 @@ class ParallelHMC:
             rtol               - relative residual tolerance for DEER early stopping
                                  (None = dtype default in deer.seq1d).
             adaptive_mass      - None: fixed identity mass (default). ``\"draw-only\"``: Welford
-                                 variance of draws only; M_ii = var_draw_i + cov_jitter; packed dim
-                                 3D+1. ``\"grad\"``: Welford variances of draws and scores; M_ii =
-                                 sqrt(var_draw/var_grad) + cov_jitter; packed dim 5D+1. For backward
-                                 compatibility, ``True`` is treated as ``\"grad\"`` and ``False`` as
-                                 None.
-            cov_jitter         - λ added on the diagonal of the mass (regularizes scale when empirical
-                                 variances are tiny; default 1.0 matches unit-mass scale).
+                                 variance of draws only; M_ii = var_draw_i, clamped to [1e-20, 1e20];
+                                 packed dim 3D+1. ``\"grad\"``: Welford variances of draws and scores;
+                                 M_ii = sqrt(var_draw/var_grad), clamped to [1e-20, 1e20]; packed dim
+                                 5D+1. Non-finite or zero entries fall back to 1.0 (unit mass). For
+                                 backward compatibility, ``True`` is treated as ``\"grad\"`` and
+                                 ``False`` as None.
         '''
         self.log_prob = log_prob
         self.D = dim
@@ -254,7 +261,6 @@ class ParallelHMC:
         self.tol = tol
         self.rtol = rtol
         self.adaptive_mass = _normalize_adaptive_mass(adaptive_mass)
-        self.cov_jitter = cov_jitter
         self.chain_state_dim = (
             _packed_state_dim(dim, self.adaptive_mass)
             if self.adaptive_mass is not None
@@ -336,14 +342,10 @@ class ParallelHMC:
 
         draw_var = _variance_diag_from_welford(count, m2_draw)
         if mode == "draw-only":
-            mass_diag = _adaptive_mass_diag(
-                "draw-only", draw_var, count, self.cov_jitter
-            )
+            mass_diag = _adaptive_mass_diag("draw-only", draw_var)
         else:
             grad_var = _variance_diag_from_welford(count, m2_grad)
-            mass_diag = _adaptive_mass_diag(
-                "grad", draw_var, count, self.cov_jitter, grad_var=grad_var
-            )
+            mass_diag = _adaptive_mass_diag("grad", draw_var, grad_var=grad_var)
 
         momentum_seed, mh_seed = jr.split(seed)
         momentum = _sample_momentum_diag_mass(mass_diag, momentum_seed, (D,))
