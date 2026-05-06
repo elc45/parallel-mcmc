@@ -150,9 +150,16 @@ def progress_plot(
 
     for ax_idx, itr in enumerate(newton_iterations):
         ax = axes_flat[ax_idx]
+
+        par_x = np.asarray(states_par[itr][:, ix], dtype=float)
+        par_y = np.asarray(states_par[itr][:, iy], dtype=float)
+        finite_mask = np.isfinite(par_x) & np.isfinite(par_y)
+        par_x = np.where(finite_mask, par_x, np.nan)
+        par_y = np.where(finite_mask, par_y, np.nan)
+
         ax.plot(
-            states_par[itr][:, ix],
-            states_par[itr][:, iy],
+            par_x,
+            par_y,
             alpha=0.75,
             rasterized=True,
             zorder=2,
@@ -176,6 +183,19 @@ def progress_plot(
             zorder=3,
             label="Initial state" if ax_idx == 0 else None,
         )
+
+        # Set axis limits from finite values only so matplotlib's tick locator
+        # never sees inf/overflow bounds.
+        finite_xs = np.concatenate([par_x[finite_mask], np.asarray(seq_with_init[:, ix], dtype=float)])
+        finite_ys = np.concatenate([par_y[finite_mask], np.asarray(seq_with_init[:, iy], dtype=float)])
+        finite_xs = finite_xs[np.isfinite(finite_xs)]
+        finite_ys = finite_ys[np.isfinite(finite_ys)]
+        if finite_xs.size and finite_ys.size:
+            xpad = max((finite_xs.max() - finite_xs.min()) * 0.05, 1e-6)
+            ypad = max((finite_ys.max() - finite_ys.min()) * 0.05, 1e-6)
+            ax.set_xlim(finite_xs.min() - xpad, finite_xs.max() + xpad)
+            ax.set_ylim(finite_ys.min() - ypad, finite_ys.max() + ypad)
+
         ax.set_xlabel(xlabel, fontsize=16)
         ax.set_ylabel(ylabel, fontsize=16)
         ax.set_title(f"Parallel Iteration {itr}", fontsize=12)
@@ -227,11 +247,11 @@ def mass_matrix_convergence_gif(
         variance_diag = np.stack([_welford_variance(i, m2s[i]) for i in range(chain_length)])
 
         fig, ax = plt.subplots()
-        for d in range(D):
+        for d in range(2):
             ax.plot(np.sign(variance_diag[:, d]) * np.log1p(np.abs(variance_diag[:, d])), label=f"dim {d}")
-        ax.set_title(f"Mass matrix variance (Newton iter={newt_iter})")
+        ax.set_title(f"Online variance estimate (Newton iter={newt_iter})")
         ax.set_xlabel("Markov Chain Iteration")
-        ax.set_ylabel("Variance")
+        ax.set_ylabel("log(welford_online_variance)")
         ax.legend()
         fig.tight_layout()
 
@@ -271,7 +291,7 @@ def position_convergence_gif(
         positions = position[newt_iter]  # (chain_length, D)
 
         fig, ax = plt.subplots()
-        for d in range(D):
+        for d in range(2):
             ax.plot(np.sign(positions[:, d]) * np.log1p(np.abs(positions[:, d])), label=f"dim {d}")
         ax.set_title(f"Position trace (Newton iter={newt_iter})")
         ax.set_xlabel("Markov Chain Iteration")

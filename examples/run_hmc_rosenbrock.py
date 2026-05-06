@@ -37,12 +37,25 @@ def _next_run_dir(runs_parent: Path) -> Path:
 # target = gym.targets.VectorModel(gym.targets.Banana(curvature=0.05),
 #                                   flatten_sample_transformations=True)
 
+with open(CONFIG_PATH) as f:
+    cfg = json.load(f)
+
+chain_length = cfg["chain_length"]
+D = int(cfg["dim"])
+key = jr.PRNGKey(cfg["random_seed"])
+key, skey = jr.split(key)
+damp_factor = float(cfg["damp_factor"])
+tol = float(cfg["tol"])
+rtol = float(cfg["rtol"])
+adaptive_mass = cfg["adaptive_mass"]
+quasi = bool(cfg["quasi"])
+qmem_efficient = bool(cfg["qmem_efficient"])
+clip_val = float(cfg["clip_val"])
+
 target = gym.targets.VectorModel(
-    gym.targets.IllConditionedGaussian(ndims=2, seed=123),
+    gym.targets.IllConditionedGaussian(ndims=D, seed=int(cfg["target_seed"])),
     flatten_sample_transformations=True,
 )
-
-D = target.event_shape[0]
 
 
 def target_log_prob(x):
@@ -55,26 +68,13 @@ def target_log_prob(x):
     return target.unnormalized_log_prob(y) + fldj
 
 
-with open(CONFIG_PATH) as f:
-    cfg = json.load(f)
-
-chain_length = cfg["chain_length"]
-key = jr.PRNGKey(cfg["random_seed"])
-key, skey = jr.split(key)
 initial_state = 0.0 + float(cfg["initial_state_scale"]) * jr.normal(skey, (D,))
 max_iter = chain_length
-damp_factor = float(cfg["damp_factor"])
-tol = float(cfg["tol"])
-rtol = float(cfg["rtol"])
-adaptive_mass = cfg["adaptive_mass"]
-quasi = bool(cfg["quasi"])
-qmem_efficient = bool(cfg["qmem_efficient"])
 
 params = {}
 params["epsilon"] = 0.5
 params["num_leapfrog_steps"] = 8
 
-# "draw-only": M_ii = var(draw) + cov_jitter (3D+1 packed). "grad": sqrt(var_draw/var_grad)+λ (5D+1).
 sampler = samplers.ParallelHMC(
     target_log_prob,
     D,
@@ -88,19 +88,20 @@ sampler = samplers.ParallelHMC(
     adaptive_mass=adaptive_mass,
     quasi=quasi,
     qmem_efficient=qmem_efficient,
-    clip_val=1e8,
+    clip_val=clip_val,
 )
 
 run_sequential = jax.jit(sampler.run_sequential_hmc)
-run_parallel = jax.jit(sampler.run_parallel_hmc)
+# run_parallel = jax.jit(sampler.run_parallel_hmc)
 
 states_seq = run_sequential(key, initial_state, params)
 
 init_trajectory_guess = initial_state[None, :] * jnp.ones((chain_length, D))
-states_par, iters = run_parallel(key, initial_state, init_trajectory_guess, params)
-print(f"Parallel samplers converged in {iters} iters")
+# states_par, iters = run_parallel(key, initial_state, init_trajectory_guess, params)
+# print(f"Parallel samplers converged in {iters} iters")
 
-max_iter = iters + 1
+# max_iter = iters + 1
+max_iter = chain_length
 
 sampler = samplers.ParallelHMC(
     target_log_prob,
@@ -115,12 +116,13 @@ sampler = samplers.ParallelHMC(
     rtol=rtol,
     adaptive_mass=adaptive_mass,
     qmem_efficient=qmem_efficient,
-    clip_val=1e8,
+    clip_val=clip_val,
 )
 
-print("Re-running parallel HMC with full trace for visualization")
+print("Running parallel HMC with full trace for visualization")
 run_parallel = jax.jit(sampler.run_parallel_hmc)
 states_par, iters = run_parallel(key, initial_state, init_trajectory_guess, params)
+print(f"DEER converged in {int(iters)} / {max_iter} Newton iterations")
 
 if __name__ == "__main__":
     run_dir = _next_run_dir(RUNS_PARENT)

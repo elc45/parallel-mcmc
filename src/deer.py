@@ -277,19 +277,31 @@ def deer_iteration_helper(
         return err, Y_i_next, gt, next_iiter
 
     def scan_func(iter_inp, args):
-        err, Y_i, gt_, iiter = iter_inp
-        # Y_i: (T, D) — full trajectory at Newton iterate i
-        Y_i_shifted = shifter_func(Y_i, shifter_func_params)
-        gt = -jnp.clip(damp_factor * jacfunc(Y_i_shifted, xinput, params), -clip_val, clip_val)
-        # rhs: (T, D)
-        rhs = func2(Y_i_shifted, xinput, params)
-        rhs += jnp.einsum("...ij,...j->...i", gt, Y_i_shifted)
-        Y_i_next = inv_lin(gt, rhs, inv_lin_params)  # (T, D)
+        err, Y_i, gt_, iiter, converged, conv_iter = iter_inp
 
-        err = jnp.max( jnp.abs(Y_i_next - Y_i) - rtol_effective * jnp.abs(Y_i) )
+        def do_work(Y_i_gt):
+            Y_i_in, gt_in = Y_i_gt
+            # Y_i_in: (T, D) — full trajectory at Newton iterate i
+            Y_i_shifted = shifter_func(Y_i_in, shifter_func_params)
+            gt = -jnp.clip(damp_factor * jacfunc(Y_i_shifted, xinput, params), -clip_val, clip_val)
+            rhs = func2(Y_i_shifted, xinput, params)
+            rhs += jnp.einsum("...ij,...j->...i", gt, Y_i_shifted)
+            Y_i_next = inv_lin(gt, rhs, inv_lin_params)
+            err_new = jnp.max(jnp.abs(Y_i_next - Y_i_in) - rtol_effective * jnp.abs(Y_i_in))
+            Y_i_next = jnp.nan_to_num(Y_i_next)
+            return Y_i_next, gt, err_new
 
-        Y_i_next = jnp.nan_to_num(Y_i_next)
-        new_carry = err, Y_i_next, gt, iiter + 1
+        def skip_work(Y_i_gt):
+            Y_i_in, gt_in = Y_i_gt
+            return Y_i_in, gt_in, err
+
+        Y_i_next, gt_new, err_new = jax.lax.cond(converged, skip_work, do_work, (Y_i, gt_))
+
+        newly_conv = (~converged) & (err_new <= tol_effective)
+        converged_new = converged | newly_conv
+        conv_iter_new = jnp.where(newly_conv, iiter + 1, conv_iter)
+
+        new_carry = err_new, Y_i_next, gt_new, iiter + 1, converged_new, conv_iter_new
         return new_carry, Y_i_next
 
     def cond_func(
@@ -306,10 +318,14 @@ def deer_iteration_helper(
 
     iiter = jnp.array(0, dtype=jnp.int32)
     if full_trace:
-        _, Y_i = jax.lax.scan(
-            scan_func, (err, init_trajectory_guess, gt, iiter), None, length=max_iter
+        converged_init = jnp.array(False)
+        conv_iter_init = jnp.array(max_iter, dtype=jnp.int32)
+        (_, _, _, _, _, samp_iters), Y_i = jax.lax.scan(
+            scan_func,
+            (err, init_trajectory_guess, gt, iiter, converged_init, conv_iter_init),
+            None,
+            length=max_iter,
         )
-        samp_iters = max_iter
     else:
         _, Y_i, gt, samp_iters = jax.lax.while_loop(
             cond_func, iter_func, (err, init_trajectory_guess, gt, iiter)
@@ -565,29 +581,42 @@ def diagonal_deer_iteration(
         return err, yt_next, gt, next_iiter
 
     def scan_func(iter_inp, args):
-        err, yt, gt_, iiter = iter_inp
-        # yt: (nsamples, ny)
-        ytparams = shifter_func(yt, shifter_func_params)
-        if qmem_efficient:
-            gt = -jnp.clip(
-                damp_factor / precond[None,:] * jax.vmap(quasi_diag_estimator, in_axes=(0, 0, None, None, 0))(
-                    ytparams, xinput, params, deer_jvp, keys),
-                -clip_val, clip_val,
-            )
-        else:
-            gt = -jnp.clip(
-                damp_factor / precond[None,:] * jax.vmap(jnp.diag)(jacfunc(ytparams, xinput, params)),
-                -clip_val, clip_val,
-            )
-        # rhs: (nsamples, ny)
-        rhs = func2(ytparams, xinput, params)
-        rhs += gt * ytparams
-        yt_next = inv_lin(gt, rhs, inv_lin_params)  # (nsamples, ny)
+        err, yt, gt_, iiter, converged, conv_iter = iter_inp
 
-        err = jnp.max( jnp.abs(yt_next - yt) - rtol_effective * jnp.abs(yt) )
+        def do_work(yt_gt):
+            yt_in, gt_in = yt_gt
+            # yt_in: (nsamples, ny)
+            ytparams = shifter_func(yt_in, shifter_func_params)
+            if qmem_efficient:
+                gt = -jnp.clip(
+                    damp_factor / precond[None, :] * jax.vmap(quasi_diag_estimator, in_axes=(0, 0, None, None, 0))(
+                        ytparams, xinput, params, deer_jvp, keys
+                    ),
+                    -clip_val, clip_val,
+                )
+            else:
+                gt = -jnp.clip(
+                    damp_factor / precond[None, :] * jax.vmap(jnp.diag)(jacfunc(ytparams, xinput, params)),
+                    -clip_val, clip_val,
+                )
+            rhs = func2(ytparams, xinput, params)
+            rhs += gt * ytparams
+            yt_next = inv_lin(gt, rhs, inv_lin_params)
+            err_new = jnp.max(jnp.abs(yt_next - yt_in) - rtol_effective * jnp.abs(yt_in))
+            yt_next = jnp.nan_to_num(yt_next)
+            return yt_next, gt, err_new
 
-        yt_next = jnp.nan_to_num(yt_next)  # XG addition, avoid nans
-        new_carry = err, yt_next, gt, iiter + 1
+        def skip_work(yt_gt):
+            yt_in, gt_in = yt_gt
+            return yt_in, gt_in, err
+
+        yt_next, gt_new, err_new = jax.lax.cond(converged, skip_work, do_work, (yt, gt_))
+
+        newly_conv = (~converged) & (err_new <= tol_effective)
+        converged_new = converged | newly_conv
+        conv_iter_new = jnp.where(newly_conv, iiter + 1, conv_iter)
+
+        new_carry = err_new, yt_next, gt_new, iiter + 1, converged_new, conv_iter_new
         return new_carry, yt_next
 
     def cond_func(
@@ -603,10 +632,14 @@ def diagonal_deer_iteration(
     )
     iiter = jnp.array(0, dtype=jnp.int32)
     if full_trace:
-        _, yt = jax.lax.scan(
-            scan_func, (err, init_trajectory_guess, gt, iiter), None, length=max_iter
+        converged_init = jnp.array(False)
+        conv_iter_init = jnp.array(max_iter, dtype=jnp.int32)
+        (_, _, _, _, _, samp_iters), yt = jax.lax.scan(
+            scan_func,
+            (err, init_trajectory_guess, gt, iiter, converged_init, conv_iter_init),
+            None,
+            length=max_iter,
         )
-        samp_iters = max_iter
     else:
         _, yt, gt, samp_iters = jax.lax.while_loop(
             cond_func, iter_func, (err, init_trajectory_guess, gt, iiter)
