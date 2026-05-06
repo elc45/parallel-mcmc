@@ -1,11 +1,11 @@
 {
-  "chain_length": 500,
-  "random_seed": 1313,
+  "chain_length": 1000,
+  "random_seed": 1234,
   "initial_state_scale": 10.0,
   "damp_factor": 0.55,
   "tol": 0.001,
   "rtol": 0.001,
-  "adaptive_mass": "draw-only",
-  "quasi": false,
+  "adaptive_mass": "grad",
+  "quasi": true,
   "qmem_efficient": false
 }

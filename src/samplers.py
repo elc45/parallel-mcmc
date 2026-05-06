@@ -118,6 +118,22 @@ def _variance_diag_from_welford(count: jnp.ndarray, m2_diag: jnp.ndarray) -> jnp
     )
 
 
+@jax.custom_jvp
+def _sqrt_nonneg(x: jnp.ndarray) -> jnp.ndarray:
+    """``sqrt(max(x,0))`` with JVP that avoids ``inf`` at ``x == 0`` (``d sqrt / dx`` blow-up)."""
+    return jnp.sqrt(jnp.maximum(x, 0.0))
+
+
+@_sqrt_nonneg.defjvp
+def _sqrt_nonneg_jvp(primals, tangents):
+    (x,) = primals
+    (dx,) = tangents
+    y = jnp.sqrt(jnp.maximum(x, 0.0))
+    # Subgradient 0 at x=0 keeps DEER ``jacfwd`` finite when Welford ratio is exactly zero.
+    inv_slope = jnp.where(x > 0.0, 0.5 / jnp.sqrt(x), 0.0)
+    return y, inv_slope * dx
+
+
 def _adaptive_mass_diag(
     mode: Literal["draw-only", "grad"],
     draw_var: jnp.ndarray,
@@ -137,7 +153,7 @@ def _adaptive_mass_diag(
         draw_var / jnp.maximum(grad_var, eps_arr),
         jnp.ones_like(draw_var),
     )
-    return jnp.sqrt(ratio) + lam
+    return _sqrt_nonneg(ratio) + lam
 
 
 def _sample_momentum_diag_mass(mass_diag: jnp.ndarray, key, shape):

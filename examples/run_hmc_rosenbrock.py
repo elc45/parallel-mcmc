@@ -88,6 +88,7 @@ sampler = samplers.ParallelHMC(
     adaptive_mass=adaptive_mass,
     quasi=quasi,
     qmem_efficient=qmem_efficient,
+    clip_val=1e8,
 )
 
 run_sequential = jax.jit(sampler.run_sequential_hmc)
@@ -114,6 +115,7 @@ sampler = samplers.ParallelHMC(
     rtol=rtol,
     adaptive_mass=adaptive_mass,
     qmem_efficient=qmem_efficient,
+    clip_val=1e8,
 )
 
 print("Re-running parallel HMC with full trace for visualization")
