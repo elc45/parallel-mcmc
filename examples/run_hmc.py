@@ -127,7 +127,7 @@ print(f"DEER converged in {int(iters)} / {max_iter} Newton iterations")
 if __name__ == "__main__":
     run_dir = _next_run_dir(RUNS_PARENT)
     run_dir.mkdir(parents=False)
-    shutil.copy2(CONFIG_PATH, run_dir / CONFIG_PATH.name)
+    shutil.copy2(CONFIG_PATH, run_dir / "config.json")
 
     plot_progress = run_dir / "progress.png"
     plot_newton = run_dir / "newton_err.png"

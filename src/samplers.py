@@ -443,6 +443,10 @@ class ParallelHMC:
         )
 
     def run_parallel_hmc(self, key, initial_state, init_trajectory_guess, params):
+        deer_params = params
+        if self.quasi and self.qmem_efficient and "key" not in params:
+            key, qmem_key = jr.split(key)
+            deer_params = {**params, "key": qmem_key}
         drivers = jr.split(key, (self.chain_length,))
 
         y0 = (
@@ -458,7 +462,7 @@ class ParallelHMC:
             func=self.hmc_fn_for_deer, 
             y0=y0, 
             xinp=drivers, 
-            params=params, 
+            params=deer_params,
             init_trajectory_guess=init_trajectory_guess, 
             max_iter=self.max_iter, 
             quasi=self.quasi, 
