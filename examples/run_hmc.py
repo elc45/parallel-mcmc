@@ -12,6 +12,7 @@ from src.util import unpack_adaptive_state_trajectory
 import plot as hmc_plot
 from inference_gym import using_jax as gym
 from tensorflow_probability.substrates import jax as tfp
+from jaxtyping import Array, Float, Int, Bool, UInt32
 
 jax.config.update("jax_enable_x64", True)
 jax.config.update("jax_default_matmul_precision", "highest")
@@ -58,15 +59,33 @@ target = gym.targets.VectorModel(
 )
 
 
-def target_log_prob(x):
-    """Unnormalized, unconstrained target density.
-    This is a thin wrapper that applies the default bijectors so that we can
-    ignore any constraints.
-    """
-    y = target.default_event_space_bijector(x)
-    fldj = target.default_event_space_bijector.forward_log_det_jacobian(x)
-    return target.unnormalized_log_prob(y) + fldj
+# def target_log_prob(x):
+#     """Unnormalized, unconstrained target density.
+#     This is a thin wrapper that applies the default bijectors so that we can
+#     ignore any constraints.
+#     """
+#     y = target.default_event_space_bijector(x)
+#     fldj = target.default_event_space_bijector.forward_log_det_jacobian(x)
+#     return target.unnormalized_log_prob(y) + fldj
 
+# load in the whitened data for bayesian logistic regression (BLR, german credit)
+X, y = jnp.asarray(np.loadtxt("data/X.txt")), jnp.asarray(np.loadtxt("data/y.txt"))
+
+# BLR prior variance + dimensionality of our data, orthogonal basis transformation Q
+sigma_blr, d, Q = 1.0, 25, jnp.load("Q.npy")
+
+# our target logp function
+def target_log_prob(beta: Float[Array, "d"]) -> Float[Array, ""]:
+    d = beta.shape[0]
+    logits = X @ beta
+
+    lp = (
+        -0.5 * jnp.sum((beta / sigma_blr) ** 2)
+        - d * jnp.log(sigma_blr)
+        - 0.5 * d * jnp.log(2.0 * jnp.pi)
+    )
+    lp += jnp.sum(y * logits - jnp.logaddexp(0.0, logits))
+    return lp
 
 initial_state = 0.0 + float(cfg["initial_state_scale"]) * jr.normal(skey, (D,))
 max_iter = chain_length

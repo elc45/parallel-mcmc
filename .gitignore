@@ -4,6 +4,7 @@ examples/plots/
 sandbox.ipynb
 examples/hmc_runs/.DS_Store
 *.npy
+!Q.npy
 *.png
 hmc_runs/
 *.DS_Store
