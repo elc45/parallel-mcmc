@@ -160,7 +160,11 @@ if __name__ == "__main__":
     )
 
     states_par_np = np.asarray(jax.device_get(states_par))
-    np.save(run_dir / "states_par.npy", states_par_np)
+    # The DEER scan always runs the full max_iter Newton steps (post-convergence iterates
+    # are identical copies). Trim those redundant trailing iterates before saving: keep the
+    # initial guess (index 0) through the converged iterate (index `iters`).
+    n_keep = min(int(iters) + 1, states_par_np.shape[0])
+    np.save(run_dir / "states_par.npy", states_par_np[:n_keep])
 
     states_seq_np = np.asarray(jax.device_get(states_seq))
     np.save(run_dir / "states_seq.npy", states_seq_np)
