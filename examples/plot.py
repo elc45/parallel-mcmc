@@ -10,11 +10,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
-
 def _welford_variance(count: float, m2_diag: np.ndarray) -> np.ndarray:
     """Unbiased sample variance per coordinate; zero when count <= 1."""
     m2_diag = np.asarray(m2_diag)
@@ -92,6 +87,138 @@ def newton_max_error_plot(
     ax.plot(iters, jnp.log(errors), marker="o", ms=3, lw=1.2)
     ax.set_xlabel("Newton iteration", fontsize=12)
     ax.set_ylabel(r"log($\max \; |\Delta Y| - \mathrm{rtol}\,|Y_{\mathrm{prev}}|$)", fontsize=11)
+    if title is not None:
+        ax.set_title(title, fontsize=12)
+    ax.grid(True, alpha=0.35)
+    if created_fig:
+        fig.tight_layout()
+    if savepath is not None:
+        fig.savefig(savepath, dpi=150, bbox_inches="tight")
+    return fig, ax
+
+
+def _max_abs_error_vs_truth(par_traj: jnp.ndarray, truth_traj: jnp.ndarray) -> jnp.ndarray:
+    """Max ``|par_traj[k] - truth_traj|`` over all non-leading axes, for each leading index ``k``.
+
+    ``par_traj`` has a leading Newton-iteration axis; ``truth_traj`` matches its trailing shape.
+    """
+    diff = jnp.abs(par_traj - truth_traj[None])
+    axes = tuple(range(1, diff.ndim))
+    return jnp.max(diff, axis=axes)
+
+
+def newton_truth_max_errors(
+    states_par: jnp.ndarray,
+    states_seq: jnp.ndarray,
+    dim: int | None = None,
+) -> jnp.ndarray:
+    """Maximum raw error between each parallel Newton iterate and the true (sequential) trajectory.
+
+    For each Newton iterate ``Y_k`` (first axis of ``states_par``, where index ``0`` is the
+    initial guess), returns ``max |Y_k - Y_seq|`` over all time steps and position dimensions.
+    Unlike :func:`newton_max_errors` (which compares *consecutive* Newton iterates and applies
+    the DEER relative-tolerance term used for early stopping), this measures convergence to the
+    ground-truth sequential chain.
+
+    Parameters
+    ----------
+    states_par
+        Full Newton trace, shape ``(num_newton_iters + 1, T, D_or_packed)``.
+    states_seq
+        Sequential ("true") chain states, shape ``(T, D_or_packed)``.
+    dim
+        Number of leading position dimensions to compare. If ``None``, inferred from
+        ``states_seq.shape[-1]`` (the sequential sampler already returns positions only). Only
+        the first ``dim`` trailing components of ``states_par`` are used so packed Welford slots
+        in the adaptive-mass case are ignored.
+    """
+    if dim is None:
+        dim = states_seq.shape[-1]
+    return _max_abs_error_vs_truth(states_par[..., :dim], states_seq[..., :dim])
+
+
+def newton_mass_truth_max_errors(
+    mass_par: jnp.ndarray,
+    mass_seq: jnp.ndarray,
+) -> jnp.ndarray:
+    """Maximum raw error between each parallel Newton iterate's mass matrix and the true one.
+
+    Parameters
+    ----------
+    mass_par
+        Diagonal mass matrix per Newton iterate, shape ``(num_newton_iters + 1, T, D)``.
+    mass_seq
+        Sequential ("true") diagonal mass matrix, shape ``(T, D)``.
+    """
+    return _max_abs_error_vs_truth(jnp.asarray(mass_par), jnp.asarray(mass_seq))
+
+
+def newton_truth_error_plot(
+    states_par: jnp.ndarray,
+    states_seq: jnp.ndarray,
+    *,
+    dim: int | None = None,
+    newton_iterations_start_at: int = 0,
+    figsize: tuple[float, float] = (7.0, 4.0),
+    savepath: Path | str | None = None,
+    title: str | None = None,
+    ax: plt.Axes | None = None,
+) -> tuple[plt.Figure, plt.Axes]:
+    """Line plot: Newton iteration vs maximum raw error against the true sequential trajectory.
+
+    The x-axis counts Newton iterations starting at ``newton_iterations_start_at`` (default ``0``,
+    so index ``0`` is the initial trajectory guess).
+    """
+    errors = newton_truth_max_errors(states_par, states_seq, dim=dim)
+    iters = jnp.arange(errors.shape[0], dtype=jnp.int32) + int(newton_iterations_start_at)
+
+    created_fig = ax is None
+    if created_fig:
+        fig, ax = plt.subplots(figsize=figsize)
+    else:
+        fig = ax.figure
+
+    ax.plot(iters, jnp.log(errors), marker="o", ms=3, lw=1.2, color="C3")
+    ax.set_xlabel("Newton iteration", fontsize=12)
+    ax.set_ylabel(r"log($\max \; |Y_{\mathrm{par}} - Y_{\mathrm{seq}}|$)", fontsize=11)
+    if title is not None:
+        ax.set_title(title, fontsize=12)
+    ax.grid(True, alpha=0.35)
+    if created_fig:
+        fig.tight_layout()
+    if savepath is not None:
+        fig.savefig(savepath, dpi=150, bbox_inches="tight")
+    return fig, ax
+
+
+def newton_mass_truth_error_plot(
+    mass_par: jnp.ndarray,
+    mass_seq: jnp.ndarray,
+    *,
+    newton_iterations_start_at: int = 0,
+    figsize: tuple[float, float] = (7.0, 4.0),
+    savepath: Path | str | None = None,
+    title: str | None = None,
+    ax: plt.Axes | None = None,
+) -> tuple[plt.Figure, plt.Axes]:
+    """Line plot: Newton iteration vs maximum raw error of the mass matrix against the true one.
+
+    The mass matrix counterpart of :func:`newton_truth_error_plot`. The x-axis counts Newton
+    iterations starting at ``newton_iterations_start_at`` (default ``0``, so index ``0`` is the
+    mass matrix implied by the initial trajectory guess).
+    """
+    errors = newton_mass_truth_max_errors(mass_par, mass_seq)
+    iters = jnp.arange(errors.shape[0], dtype=jnp.int32) + int(newton_iterations_start_at)
+
+    created_fig = ax is None
+    if created_fig:
+        fig, ax = plt.subplots(figsize=figsize)
+    else:
+        fig = ax.figure
+
+    ax.plot(iters, jnp.log(errors), marker="o", ms=3, lw=1.2, color="C2")
+    ax.set_xlabel("Newton iteration", fontsize=12)
+    ax.set_ylabel(r"log($\max_{i}\; |M_{i, \mathrm{par}} - M_{i, \mathrm{seq}}|$)", fontsize=11)
     if title is not None:
         ax.set_title(title, fontsize=12)
     ax.grid(True, alpha=0.35)

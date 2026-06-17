@@ -1,9 +1,6 @@
 {
-  "target": "blr_german_credit",
-  "target_params": {
-    "data_dir": "data",
-    "sigma_blr": 1.0
-  },
+  "target": "gaussian_10d",
+  "target_params": {},
   "chain_length": 500,
   "random_seed": 123,
   "initial_state_scale": 10.0,
