@@ -330,9 +330,10 @@ class ParallelHMC:
         D = self.D
         step_size = params["epsilon"]
         num_steps = params["num_leapfrog_steps"]
-        seed = driver
+        seed, t = driver
         mode = self.adaptive_mass
         assert mode is not None
+        mass_adapt_steps = int(params.get("mass_adapt_steps", 100))
 
         unpacked = self._unpack_adaptive_state(packed_state)
         if mode == "draw-only":
@@ -372,18 +373,28 @@ class ParallelHMC:
         g = sigmoid_accept(log_accept_ratio - jnp.log(u))
         new_position = g * new_position + (1.0 - g) * position
 
+        do_adapt = t < mass_adapt_steps
         if mode == "draw-only":
-            count_n, mean_n, m2_n = _welford_update_diag(
-                count, mean_draw, m2_draw, new_position
+            count_n, mean_n, m2_n = jax.lax.cond(
+                do_adapt,
+                lambda _: _welford_update_diag(count, mean_draw, m2_draw, new_position),
+                lambda _: (count, mean_draw, m2_draw),
+                operand=None,
             )
             return _pack_draw_only(new_position, count_n, mean_n, m2_n)
 
         grad_chain = g * new_tlp_grad + (1.0 - g) * tlp_grad
-        count_n, mean_draw_n, m2_draw_n = _welford_update_diag(
-            count, mean_draw, m2_draw, new_position
+        count_n, mean_draw_n, m2_draw_n = jax.lax.cond(
+            do_adapt,
+            lambda _: _welford_update_diag(count, mean_draw, m2_draw, new_position),
+            lambda _: (count, mean_draw, m2_draw),
+            operand=None,
         )
-        _, mean_grad_n, m2_grad_n = _welford_update_diag(
-            count, mean_grad, m2_grad, grad_chain
+        _, mean_grad_n, m2_grad_n = jax.lax.cond(
+            do_adapt,
+            lambda _: _welford_update_diag(count, mean_grad, m2_grad, grad_chain),
+            lambda _: (count, mean_grad, m2_grad),
+            operand=None,
         )
         return _pack_adaptive_state(
             new_position, count_n, mean_draw_n, m2_draw_n, mean_grad_n, m2_grad_n
@@ -393,7 +404,7 @@ class ParallelHMC:
         if self.adaptive_mass is not None:
             return self._hmc_adaptive_mass(state, driver, params)
 
-        seed = driver
+        seed, _t = driver
         position = state 
         step_size = params['epsilon'] 
         momentum_seed, mh_seed = jax.random.split(seed)
@@ -429,7 +440,7 @@ class ParallelHMC:
             nxt = self.hmc_fn_for_deer(state, driver, params)
             return nxt, nxt
 
-        drivers = jr.split(key, (self.chain_length,))
+        drivers = (jr.split(key, (self.chain_length,)), jnp.arange(self.chain_length))
         init = (
             self._initial_packed_state(initial_state)
             if self.adaptive_mass is not None
@@ -447,7 +458,7 @@ class ParallelHMC:
         if self.quasi and self.qmem_efficient and "key" not in params:
             key, qmem_key = jr.split(key)
             deer_params = {**params, "key": qmem_key}
-        drivers = jr.split(key, (self.chain_length,))
+        drivers = (jr.split(key, (self.chain_length,)), jnp.arange(self.chain_length))
 
         y0 = (
             self._initial_packed_state(initial_state)

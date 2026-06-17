@@ -15,7 +15,7 @@ import numpy as np
 # ---------------------------------------------------------------------------
 
 
-def _welford_variance(count: int, m2_diag: np.ndarray) -> np.ndarray:
+def _welford_variance(count: float, m2_diag: np.ndarray) -> np.ndarray:
     """Unbiased sample variance per coordinate; zero when count <= 1."""
     m2_diag = np.asarray(m2_diag)
     if count > 1:
@@ -218,6 +218,7 @@ def mass_matrix_convergence_gif(
     m2_draw: np.ndarray,
     savepath: Path | str,
     *,
+    count: np.ndarray,
     step: int = 5,
     duration: float = 0.005,
 ) -> None:
@@ -228,9 +229,13 @@ def mass_matrix_convergence_gif(
     m2_draw
         Welford M2 accumulator for draws, shape ``(num_newton_iters, chain_length, D)``.
         ``m2_draw[k, i, d]`` is the running sum-of-squared-deviations for dimension ``d``
-        after ``i`` chain steps at Newton iteration ``k``.
+        at chain index ``i`` and Newton iteration ``k``.
     savepath
         Output path for the GIF file.
+    count
+        Welford sample count from the packed chain state, shape
+        ``(num_newton_iters, chain_length)``. Must be used (not the chain index) so
+        that frozen mass after warmup appears flat in the plot.
     step
         Sample every ``step`` Newton iterations for animation frames.
     duration
@@ -239,12 +244,16 @@ def mass_matrix_convergence_gif(
     import imageio
 
     m2_draw = np.asarray(m2_draw)
+    count = np.asarray(count)
     num_newton_iters, chain_length, D = m2_draw.shape
     gif_frames = []
 
     for newt_iter in range(0, num_newton_iters, step):
         m2s = m2_draw[newt_iter]  # (chain_length, D)
-        variance_diag = np.stack([_welford_variance(i, m2s[i]) for i in range(chain_length)])
+        counts = np.asarray(count[newt_iter]).reshape(-1)
+        variance_diag = np.stack(
+            [_welford_variance(c, m2s[i]) for i, c in enumerate(counts)]
+        )
 
         fig, ax = plt.subplots()
         for d in range(2):

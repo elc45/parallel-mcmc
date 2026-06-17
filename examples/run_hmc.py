@@ -1,5 +1,7 @@
+import argparse
 import json
 import shutil
+import sys
 from pathlib import Path
 
 import jax
@@ -9,18 +11,17 @@ import numpy as np
 from src import samplers
 from src.util import unpack_adaptive_state_trajectory
 
+_EXAMPLES_DIR = Path(__file__).resolve().parent
+if str(_EXAMPLES_DIR) not in sys.path:
+    sys.path.insert(0, str(_EXAMPLES_DIR))
+
 import plot as hmc_plot
-from inference_gym import using_jax as gym
-from tensorflow_probability.substrates import jax as tfp
-from jaxtyping import Array, Float, Int, Bool, UInt32
+from targets import load_target
 
 jax.config.update("jax_enable_x64", True)
 jax.config.update("jax_default_matmul_precision", "highest")
 
-tfd = tfp.distributions
-
-_EXAMPLES_DIR = Path(__file__).resolve().parent
-CONFIG_PATH = _EXAMPLES_DIR / "run_hmc_rosenbrock_config.json"
+DEFAULT_CONFIG_PATH = _EXAMPLES_DIR / "configs" / "ill_conditioned_gaussian.json"
 RUNS_PARENT = _EXAMPLES_DIR / "hmc_runs"
 
 _SHOW_DEER_PROGRESS = __name__ == "__main__"
@@ -35,14 +36,27 @@ def _next_run_dir(runs_parent: Path) -> Path:
     return runs_parent / str(max_n + 1)
 
 
-# target = gym.targets.VectorModel(gym.targets.Banana(curvature=0.05),
-#                                   flatten_sample_transformations=True)
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run parallel HMC with DEER.")
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=DEFAULT_CONFIG_PATH,
+        help="Path to JSON run config (default: examples/configs/ill_conditioned_gaussian.json).",
+    )
+    return parser.parse_args()
 
-with open(CONFIG_PATH) as f:
+
+args = _parse_args()
+config_path = args.config.resolve()
+with open(config_path) as f:
     cfg = json.load(f)
 
+target = load_target(cfg["target"], cfg.get("target_params"))
+D = target.dim
+target_log_prob = target.log_prob
+
 chain_length = cfg["chain_length"]
-D = int(cfg["dim"])
 key = jr.PRNGKey(cfg["random_seed"])
 key, skey = jr.split(key)
 damp_factor = float(cfg["damp_factor"])
@@ -53,46 +67,13 @@ quasi = bool(cfg["quasi"])
 qmem_efficient = bool(cfg["qmem_efficient"])
 clip_val = float(cfg["clip_val"])
 
-target = gym.targets.VectorModel(
-    gym.targets.IllConditionedGaussian(ndims=D, seed=int(cfg["target_seed"])),
-    flatten_sample_transformations=True,
-)
-
-
-# def target_log_prob(x):
-#     """Unnormalized, unconstrained target density.
-#     This is a thin wrapper that applies the default bijectors so that we can
-#     ignore any constraints.
-#     """
-#     y = target.default_event_space_bijector(x)
-#     fldj = target.default_event_space_bijector.forward_log_det_jacobian(x)
-#     return target.unnormalized_log_prob(y) + fldj
-
-# load in the whitened data for bayesian logistic regression (BLR, german credit)
-X, y = jnp.asarray(np.loadtxt("data/X.txt")), jnp.asarray(np.loadtxt("data/y.txt"))
-
-# BLR prior variance + dimensionality of our data, orthogonal basis transformation Q
-sigma_blr, d, Q = 1.0, 25, jnp.load("Q.npy")
-
-# our target logp function
-def target_log_prob(beta: Float[Array, "d"]) -> Float[Array, ""]:
-    d = beta.shape[0]
-    logits = X @ beta
-
-    lp = (
-        -0.5 * jnp.sum((beta / sigma_blr) ** 2)
-        - d * jnp.log(sigma_blr)
-        - 0.5 * d * jnp.log(2.0 * jnp.pi)
-    )
-    lp += jnp.sum(y * logits - jnp.logaddexp(0.0, logits))
-    return lp
-
 initial_state = 0.0 + float(cfg["initial_state_scale"]) * jr.normal(skey, (D,))
 max_iter = chain_length
 
-params = {}
-params["epsilon"] = 0.5
-params["num_leapfrog_steps"] = 8
+params = {
+    "epsilon": float(cfg.get("epsilon", 0.5)),
+    "num_leapfrog_steps": int(cfg.get("num_leapfrog_steps", 8)),
+}
 
 sampler = samplers.ParallelHMC(
     target_log_prob,
@@ -111,15 +92,9 @@ sampler = samplers.ParallelHMC(
 )
 
 run_sequential = jax.jit(sampler.run_sequential_hmc)
-# run_parallel = jax.jit(sampler.run_parallel_hmc)
-
 states_seq = run_sequential(key, initial_state, params)
 
 init_trajectory_guess = initial_state[None, :] * jnp.ones((chain_length, D))
-# states_par, iters = run_parallel(key, initial_state, init_trajectory_guess, params)
-# print(f"Parallel samplers converged in {iters} iters")
-
-# max_iter = iters + 1
 max_iter = chain_length
 
 sampler = samplers.ParallelHMC(
@@ -146,7 +121,7 @@ print(f"DEER converged in {int(iters)} / {max_iter} Newton iterations")
 if __name__ == "__main__":
     run_dir = _next_run_dir(RUNS_PARENT)
     run_dir.mkdir(parents=False)
-    shutil.copy2(CONFIG_PATH, run_dir / "config.json")
+    shutil.copy2(config_path, run_dir / "config.json")
 
     plot_progress = run_dir / "progress.png"
     plot_newton = run_dir / "newton_err.png"
@@ -155,7 +130,7 @@ if __name__ == "__main__":
         states_par,
         states_seq,
         initial_state,
-        [1, 10, 25, max_iter],
+        [1, 10, (max_iter//2), max_iter],
         chain_length=chain_length,
         quasi=quasi,
         savepath=plot_progress,
@@ -175,10 +150,12 @@ if __name__ == "__main__":
     if adaptive_mass_mode is not None:
         unpacked = unpack_adaptive_state_trajectory(states_par_np, D, adaptive_mass_mode)
         position_arr = unpacked[0]
+        count_arr = unpacked[1]
         m2_arr = unpacked[3]
         hmc_plot.mass_matrix_convergence_gif(
             m2_arr,
             run_dir / "mass_matrix_trace.gif",
+            count=count_arr,
         )
         hmc_plot.position_convergence_gif(
             position_arr,
