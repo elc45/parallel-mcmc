@@ -47,41 +47,43 @@ def _normalize_adaptive_mass(
 
 
 def _packed_state_dim(D: int, mode: Literal["grad", "draw-only"]) -> int:
-    """Packed chain state length for adaptive mass."""
+    """Packed chain state length for adaptive mass.
+
+    ``count`` is *not* stored: it is a deterministic function of the chain index
+    (``min(t, mass_adapt_steps)``) and is reconstructed from the driver inside the
+    transition, so it is omitted from the packed layout.
+    """
     if mode == "draw-only":
-        return 3 * D + 1
-    return 5 * D + 1
+        return 3 * D
+    return 5 * D
 
 
 def _unpack_draw_only(packed: jnp.ndarray, D: int):
-    """Position (D) + count (1) + mean (D) + M2 (D)."""
+    """Position (D) + mean (D) + M2 (D)."""
     position = packed[:D]
-    count = packed[D]
-    mean = packed[D + 1 : 2 * D + 1]
-    m2_diag = packed[2 * D + 1 :]
-    return position, count, mean, m2_diag
+    mean = packed[D : 2 * D]
+    m2_diag = packed[2 * D :]
+    return position, mean, m2_diag
 
 
-def _pack_draw_only(position, count, mean, m2_diag):
-    return jnp.concatenate([position, count[None], mean, m2_diag])
+def _pack_draw_only(position, mean, m2_diag):
+    return jnp.concatenate([position, mean, m2_diag])
 
 
 def _unpack_grad_adaptive_state(packed: jnp.ndarray, D: int):
-    """Unpack ``grad`` layout: position, count, draw Welford, grad Welford (packed dim ``5D+1``)."""
+    """Unpack ``grad`` layout: position, draw Welford, grad Welford (packed dim ``5D``)."""
     position = packed[:D]
-    count = packed[D]
-    mean_draw = packed[D + 1 : 2 * D + 1]
-    m2_draw = packed[2 * D + 1 : 3 * D + 1]
-    mean_grad = packed[3 * D + 1 : 4 * D + 1]
-    m2_grad = packed[4 * D + 1 :]
-    return position, count, mean_draw, m2_draw, mean_grad, m2_grad
+    mean_draw = packed[D : 2 * D]
+    m2_draw = packed[2 * D : 3 * D]
+    mean_grad = packed[3 * D : 4 * D]
+    m2_grad = packed[4 * D :]
+    return position, mean_draw, m2_draw, mean_grad, m2_grad
 
 
-def _pack_adaptive_state(position, count, mean_draw, m2_draw, mean_grad, m2_grad):
+def _pack_adaptive_state(position, mean_draw, m2_draw, mean_grad, m2_grad):
     """Pack the constituent parts into a packed state x.
     Args:
         position: jnp.ndarray
-        count: jnp.ndarray
         mean_draw: jnp.ndarray
         m2_draw: jnp.ndarray
         mean_grad: jnp.ndarray
@@ -91,7 +93,7 @@ def _pack_adaptive_state(position, count, mean_draw, m2_draw, mean_grad, m2_grad
             The packed state x.
     """
     return jnp.concatenate(
-        [position, count[None], mean_draw, m2_draw, mean_grad, m2_grad]
+        [position, mean_draw, m2_draw, mean_grad, m2_grad]
     )
 
 
@@ -191,6 +193,7 @@ class ParallelHMC:
     tol: float | None
     rtol: float | None
     adaptive_mass: Literal["grad", "draw-only"] | None
+    welford_init: dict
     chain_state_dim: int
     target_log_prob_and_grad: Callable
 
@@ -209,7 +212,8 @@ class ParallelHMC:
                 show_progress: bool = False, 
                 tol: float | None = None, 
                 rtol: float | None = None,
-                adaptive_mass: str | bool | None = None):
+                adaptive_mass: str | bool | None = None,
+                welford_init: dict | None = None):
         '''
         Args:
             log_prob           - unnormalized log-posterior callable; must accept only the position
@@ -239,11 +243,22 @@ class ParallelHMC:
                                  (None = dtype default in deer.seq1d).
             adaptive_mass      - None: fixed identity mass (default). ``\"draw-only\"``: Welford
                                  variance of draws only; M_ii = var_draw_i, clamped to [1e-20, 1e20];
-                                 packed dim 3D+1. ``\"grad\"``: Welford variances of draws and scores;
+                                 packed dim 3D. ``\"grad\"``: Welford variances of draws and scores;
                                  M_ii = sqrt(var_draw/var_grad), clamped to [1e-20, 1e20]; packed dim
-                                 5D+1. Non-finite or zero entries fall back to 1.0 (unit mass). For
+                                 5D. Non-finite or zero entries fall back to 1.0 (unit mass). For
                                  backward compatibility, ``True`` is treated as ``\"grad\"`` and
-                                 ``False`` as None.
+                                 ``False`` as None. The Welford sample count is *not* stored in the
+                                 packed state; it is reconstructed from the chain index as
+                                 ``min(t, mass_adapt_steps)`` inside the transition.
+            welford_init       - optional dict controlling how the Welford accumulator slots of the
+                                 initial parallel trajectory guess are seeded (see
+                                 ``_pack_init_trajectory_guess``). Recognized keys: ``\"mean\"``,
+                                 ``\"m2\"`` (draw accumulators) and, for ``\"grad\"`` mode,
+                                 ``\"grad_mean\"``/``\"grad_m2\"`` (default to the ``\"mean\"``/``\"m2\"``
+                                 specs). Each value is either a number (constant fill) or one of the
+                                 strings ``\"zeros\"``, ``\"ones\"``, ``\"ramp\"`` (``1..T``), or
+                                 ``\"positions\"`` (the trajectory guess itself; means only). Missing
+                                 keys / ``None`` preserve the defaults: all means/M2 = ``zeros``.
         '''
         self.log_prob = log_prob
         self.D = dim
@@ -261,6 +276,7 @@ class ParallelHMC:
         self.tol = tol
         self.rtol = rtol
         self.adaptive_mass = _normalize_adaptive_mass(adaptive_mass)
+        self.welford_init = dict(welford_init) if welford_init else {}
         self.chain_state_dim = (
             _packed_state_dim(dim, self.adaptive_mass)
             if self.adaptive_mass is not None
@@ -291,26 +307,86 @@ class ParallelHMC:
         D = self.D
         dtype = position.dtype
         z = jnp.zeros((D,), dtype=dtype)
-        c = jnp.array(0.0, dtype=dtype)
         if self.adaptive_mass == "draw-only":
-            return _pack_draw_only(position, c, z, z)
-        return _pack_adaptive_state(position, c, z, z, z, z)
+            return _pack_draw_only(position, z, z)
+        return _pack_adaptive_state(position, z, z, z, z)
+
+    def _resolve_welford_init(
+        self,
+        spec,
+        default: jnp.ndarray,
+        *,
+        shape: tuple[int, ...],
+        dtype,
+        positions: jnp.ndarray | None = None,
+    ) -> jnp.ndarray:
+        """Interpret a single ``welford_init`` spec into an array of ``shape``.
+
+        ``None`` -> ``default`` (current behavior). Numbers -> constant fill. Strings:
+        ``\"zeros\"``, ``\"ones\"``, ``\"ramp\"`` (``1..T`` along axis 0), ``\"positions\"``
+        (broadcast ``positions``; means only).
+        """
+        if spec is None:
+            return default
+        if isinstance(spec, str):
+            key = spec.strip().lower()
+            if key == "zeros":
+                return jnp.zeros(shape, dtype=dtype)
+            if key == "ones":
+                return jnp.ones(shape, dtype=dtype)
+            if key == "ramp":
+                ramp = jnp.arange(1, shape[0] + 1, dtype=dtype)
+                ramp = ramp.reshape((shape[0],) + (1,) * (len(shape) - 1))
+                return jnp.broadcast_to(ramp, shape).astype(dtype)
+            if key == "positions":
+                if positions is None:
+                    raise ValueError("welford_init 'positions' is only valid for mean slots")
+                return jnp.broadcast_to(positions, shape).astype(dtype)
+            raise ValueError(
+                f"Unknown welford_init spec {spec!r}; expected a number or one of "
+                "'zeros', 'ones', 'ramp', 'positions'"
+            )
+        return jnp.full(shape, float(spec), dtype=dtype)
 
     def _pack_init_trajectory_guess(self, y_positions: jnp.ndarray) -> jnp.ndarray:
-        """Expand an initial (T, D) trajectory guess to (T, chain_state_dim) with Welford slots."""
+        """Expand an initial (T, D) trajectory guess to (T, chain_state_dim) with Welford slots.
+
+        The Welford accumulator slots are seeded according to ``self.welford_init`` (see the
+        constructor docstring); defaults reproduce the original behavior: all means/M2 = zeros.
+        ``count`` is not part of the state (it is derived from the chain index in the transition).
+        """
         T, D = y_positions.shape
         dtype = y_positions.dtype
-        count = jnp.arange(1, T + 1, dtype=dtype)[:, None]
+        init = self.welford_init
+
+        zeros = jnp.zeros((T, D), dtype=dtype)
         if self.adaptive_mass == "draw-only":
-            means = jnp.zeros((T, D), dtype=dtype)
-            m2s = jnp.zeros((T, D), dtype=dtype)
-            return jnp.concatenate([y_positions, count, means, m2s], axis=-1)
-        draw_means = jnp.zeros((T, D), dtype=dtype)
-        draw_m2s = jnp.zeros((T, D), dtype=dtype)
-        grad_means = jnp.zeros((T, D), dtype=dtype)
-        grad_m2s = jnp.zeros((T, D), dtype=dtype)
+            means = self._resolve_welford_init(
+                init.get("mean"), zeros, shape=(T, D), dtype=dtype, positions=y_positions
+            )
+            m2s = self._resolve_welford_init(
+                init.get("m2"), zeros, shape=(T, D), dtype=dtype
+            )
+            return jnp.concatenate([y_positions, means, m2s], axis=-1)
+
+        draw_means = self._resolve_welford_init(
+            init.get("mean"), zeros, shape=(T, D), dtype=dtype, positions=y_positions
+        )
+        draw_m2s = self._resolve_welford_init(
+            init.get("m2"), zeros, shape=(T, D), dtype=dtype
+        )
+        grad_means = self._resolve_welford_init(
+            init.get("grad_mean", init.get("mean")),
+            zeros,
+            shape=(T, D),
+            dtype=dtype,
+            positions=y_positions,
+        )
+        grad_m2s = self._resolve_welford_init(
+            init.get("grad_m2", init.get("m2")), zeros, shape=(T, D), dtype=dtype
+        )
         return jnp.concatenate(
-            [y_positions, count, draw_means, draw_m2s, grad_means, grad_m2s], axis=-1
+            [y_positions, draw_means, draw_m2s, grad_means, grad_m2s], axis=-1
         )
 
     def _positions_only(self, states: jnp.ndarray) -> jnp.ndarray:
@@ -333,13 +409,18 @@ class ParallelHMC:
         seed, t = driver
         mode = self.adaptive_mass
         assert mode is not None
-        mass_adapt_steps = int(params.get("mass_adapt_steps", 100))
+        mass_adapt_steps = params.get("mass_adapt_steps", 100)
 
         unpacked = self._unpack_adaptive_state(packed_state)
         if mode == "draw-only":
-            position, count, mean_draw, m2_draw = unpacked
+            position, mean_draw, m2_draw = unpacked
         else:
-            position, count, mean_draw, m2_draw, mean_grad, m2_grad = unpacked
+            position, mean_draw, m2_draw, mean_grad, m2_grad = unpacked
+
+        # count is not carried in the state: it is exactly the number of adaptation updates
+        # already applied, which (because adaptation is gated purely by t < mass_adapt_steps)
+        # equals the incoming count min(t, mass_adapt_steps).
+        count = jnp.minimum(t, mass_adapt_steps).astype(position.dtype)
 
         draw_var = _variance_diag_from_welford(count, m2_draw)
         if mode == "draw-only":
@@ -375,16 +456,16 @@ class ParallelHMC:
 
         do_adapt = t < mass_adapt_steps
         if mode == "draw-only":
-            count_n, mean_n, m2_n = jax.lax.cond(
+            _, mean_n, m2_n = jax.lax.cond(
                 do_adapt,
                 lambda _: _welford_update_diag(count, mean_draw, m2_draw, new_position),
                 lambda _: (count, mean_draw, m2_draw),
                 operand=None,
             )
-            return _pack_draw_only(new_position, count_n, mean_n, m2_n)
+            return _pack_draw_only(new_position, mean_n, m2_n)
 
         grad_chain = g * new_tlp_grad + (1.0 - g) * tlp_grad
-        count_n, mean_draw_n, m2_draw_n = jax.lax.cond(
+        _, mean_draw_n, m2_draw_n = jax.lax.cond(
             do_adapt,
             lambda _: _welford_update_diag(count, mean_draw, m2_draw, new_position),
             lambda _: (count, mean_draw, m2_draw),
@@ -397,7 +478,7 @@ class ParallelHMC:
             operand=None,
         )
         return _pack_adaptive_state(
-            new_position, count_n, mean_draw_n, m2_draw_n, mean_grad_n, m2_grad_n
+            new_position, mean_draw_n, m2_draw_n, mean_grad_n, m2_grad_n
         )
 
     def hmc_fn_for_deer(self, state, driver, params):
@@ -434,7 +515,8 @@ class ParallelHMC:
         new_position = g*new_position + (1.0-g)*position
         return new_position
 
-    def run_sequential_hmc(self, key, initial_state, params):
+    def _run_sequential_packed(self, key, initial_state, params):
+        """Run the sequential chain, returning the full (possibly packed) state trajectory."""
 
         def _fn_for_scan(state, driver):
             nxt = self.hmc_fn_for_deer(state, driver, params)
@@ -447,11 +529,25 @@ class ParallelHMC:
             else initial_state
         )
         _, out_states = jax.lax.scan(_fn_for_scan, init, drivers)
+        return out_states
+
+    def run_sequential_hmc(self, key, initial_state, params):
+        out_states = self._run_sequential_packed(key, initial_state, params)
         return (
             self._positions_only(out_states)
             if self.adaptive_mass is not None
             else out_states
         )
+
+    def run_sequential_hmc_full(self, key, initial_state, params):
+        """Sequential HMC returning the full packed chain state.
+
+        Identical chain to :meth:`run_sequential_hmc`, but retains the trailing Welford
+        accumulators (draw/grad mean & M2) when ``adaptive_mass`` is active so the diagonal
+        mass matrix can be reconstructed. When ``adaptive_mass`` is ``None`` this is
+        identical to :meth:`run_sequential_hmc` (the state is already positions only).
+        """
+        return self._run_sequential_packed(key, initial_state, params)
 
     def run_parallel_hmc(self, key, initial_state, init_trajectory_guess, params):
         deer_params = params

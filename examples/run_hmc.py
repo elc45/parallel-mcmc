@@ -9,7 +9,11 @@ import jax.numpy as jnp
 import jax.random as jr
 import numpy as np
 from src import samplers
-from src.util import unpack_adaptive_state_trajectory
+from src.util import (
+    mass_diag_trajectory,
+    unpack_adaptive_state_trajectory,
+    welford_count_trajectory,
+)
 
 _EXAMPLES_DIR = Path(__file__).resolve().parent
 if str(_EXAMPLES_DIR) not in sys.path:
@@ -66,6 +70,7 @@ adaptive_mass = cfg["adaptive_mass"]
 quasi = bool(cfg["quasi"])
 qmem_efficient = bool(cfg["qmem_efficient"])
 clip_val = float(cfg["clip_val"])
+welford_init = cfg.get("welford_init")
 
 initial_state = 0.0 + float(cfg["initial_state_scale"]) * jr.normal(skey, (D,))
 max_iter = chain_length
@@ -73,6 +78,7 @@ max_iter = chain_length
 params = {
     "epsilon": float(cfg.get("epsilon", 0.5)),
     "num_leapfrog_steps": int(cfg.get("num_leapfrog_steps", 8)),
+    "mass_adapt_steps": int(cfg.get("mass_adapt_steps", 100)),
 }
 
 sampler = samplers.ParallelHMC(
@@ -89,10 +95,12 @@ sampler = samplers.ParallelHMC(
     quasi=quasi,
     qmem_efficient=qmem_efficient,
     clip_val=clip_val,
+    welford_init=welford_init,
 )
 
-run_sequential = jax.jit(sampler.run_sequential_hmc)
-states_seq = run_sequential(key, initial_state, params)
+run_sequential = jax.jit(sampler.run_sequential_hmc_full)
+states_seq_full = run_sequential(key, initial_state, params)
+states_seq = states_seq_full[..., :D]
 
 init_trajectory_guess = initial_state[None, :] * jnp.ones((chain_length, D))
 max_iter = chain_length
@@ -111,6 +119,7 @@ sampler = samplers.ParallelHMC(
     adaptive_mass=adaptive_mass,
     qmem_efficient=qmem_efficient,
     clip_val=clip_val,
+    welford_init=welford_init,
 )
 
 print("Running parallel HMC with full trace for visualization")
@@ -125,6 +134,7 @@ if __name__ == "__main__":
 
     plot_progress = run_dir / "progress.png"
     plot_newton = run_dir / "newton_err.png"
+    plot_newton_truth = run_dir / "newton_truth_err.png"
 
     hmc_plot.progress_plot(
         states_par,
@@ -141,17 +151,47 @@ if __name__ == "__main__":
         savepath=plot_newton,
         title=f"DEER Newton error ({target.name})",
     )
+    hmc_plot.newton_truth_error_plot(
+        states_par,
+        states_seq,
+        dim=D,
+        savepath=plot_newton_truth,
+        title=f"Parallel-vs-sequential trajectory error ({target.name})",
+    )
 
     states_par_np = np.asarray(jax.device_get(states_par))
     np.save(run_dir / "states_par.npy", states_par_np)
 
-    print("Creating GIFs...")
+    states_seq_np = np.asarray(jax.device_get(states_seq))
+    np.save(run_dir / "states_seq.npy", states_seq_np)
+
+    states_seq_full_np = np.asarray(jax.device_get(states_seq_full))
+
     adaptive_mass_mode = samplers._normalize_adaptive_mass(adaptive_mass)
+    mass_adapt_steps = params["mass_adapt_steps"]
+    if adaptive_mass_mode is not None:
+        # Reconstruct diagonal mass matrices and compare parallel Newton iterates to truth.
+        mass_par = mass_diag_trajectory(states_par_np, D, adaptive_mass_mode, mass_adapt_steps)
+        mass_seq = mass_diag_trajectory(states_seq_full_np, D, adaptive_mass_mode, mass_adapt_steps)
+        np.save(run_dir / "mass_matrix_seq.npy", mass_seq)
+        hmc_plot.newton_mass_truth_error_plot(
+            mass_par,
+            mass_seq,
+            savepath=run_dir / "newton_mass_truth_err.png",
+            title=f"Parallel-vs-sequential mass matrix error ({target.name})",
+        )
+        print(f"Saved sequential mass matrix (mass_matrix_seq.npy) and convergence plot under {run_dir}")
+
+    print("Creating GIFs...")
     if adaptive_mass_mode is not None:
         unpacked = unpack_adaptive_state_trajectory(states_par_np, D, adaptive_mass_mode)
         position_arr = unpacked[0]
-        count_arr = unpacked[1]
-        m2_arr = unpacked[3]
+        m2_arr = unpacked[2]
+        # count is no longer stored in the state; reconstruct it (identical across Newton
+        # iterates) and broadcast to (num_newton_iters, chain_length) for the GIF.
+        num_newton_iters, chain_len = states_par_np.shape[0], states_par_np.shape[1]
+        count_1d = welford_count_trajectory(chain_len, mass_adapt_steps)
+        count_arr = np.broadcast_to(count_1d, (num_newton_iters, chain_len))
         hmc_plot.mass_matrix_convergence_gif(
             m2_arr,
             run_dir / "mass_matrix_trace.gif",
@@ -167,4 +207,4 @@ if __name__ == "__main__":
             run_dir / "trace.gif",
         )
 
-    print(f"Saved config, plots, states_par.npy, and GIFs under {run_dir}")
+    print(f"Saved config, plots, states_par.npy, states_seq.npy, and GIFs under {run_dir}")
