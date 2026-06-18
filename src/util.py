@@ -113,8 +113,8 @@ def mass_diag_trajectory(
     D:
         Dimensionality of the position space.
     mode:
-        Adaptive mass mode, ``"draw-only"`` (mass = draw variance) or ``"grad"``
-        (mass = ``sqrt(var_draw / var_grad)``).
+        Adaptive mass mode, ``"draw-only"`` (mass = ``1 / draw variance``) or ``"grad"``
+        (mass = ``sqrt(var_grad / var_draw)``). Both estimate ``M ~= Sigma^{-1}``.
     mass_adapt_steps:
         Number of leading steps over which the mass matrix is adapted; used to reconstruct
         the (no-longer-stored) Welford sample count via :func:`welford_count_trajectory`.
@@ -134,13 +134,15 @@ def mass_diag_trajectory(
     unpacked = unpack_adaptive_state_trajectory(packed, D, mode)
     if mode == "draw-only":
         _position, _mean, m2_draw = unpacked
-        val = _variance_diag_from_welford_np(count, m2_draw)
+        draw_var = _variance_diag_from_welford_np(count, m2_draw)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            val = 1.0 / draw_var
     else:
         _position, _mean_draw, m2_draw, _mean_grad, m2_grad = unpacked
         draw_var = _variance_diag_from_welford_np(count, m2_draw)
         grad_var = _variance_diag_from_welford_np(count, m2_grad)
         with np.errstate(divide="ignore", invalid="ignore"):
-            val = np.sqrt(np.maximum(draw_var / grad_var, 0.0))
+            val = np.sqrt(np.maximum(grad_var / draw_var, 0.0))
     return np.where(
         np.isfinite(val) & (val > 0.0),
         np.clip(val, clamp[0], clamp[1]),

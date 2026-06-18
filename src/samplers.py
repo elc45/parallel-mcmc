@@ -147,20 +147,24 @@ def _adaptive_mass_diag(
     fill_invalid: float = 1.0,
     clamp: tuple[float, float] = (_MASS_LOWER, _MASS_UPPER),
 ) -> jnp.ndarray:
-    """Diagonal mass from Welford variances.
+    """Diagonal mass that preconditions the target toward unit variance.
 
-    draw-only: mass = draw_var
-    grad:      mass = sqrt(draw_var / grad_var)
+    With this code's kinetic convention (p ~ N(0, M), q-dot = M^{-1} p), isotropic
+    dynamics (q-ddot = -q) for a target with covariance Sigma require M = Sigma^{-1}.
+    Since draw_var ~= Sigma and Var(grad) ~= Sigma^{-1} (Gaussian Fisher), the mass is:
+
+    draw-only: mass = 1 / draw_var                  (~= Sigma^{-1})
+    grad:      mass = sqrt(grad_var / draw_var)      (geometric-mean estimate of Sigma^{-1})
 
     Non-finite or zero entries are replaced with fill_invalid (default 1.0),
     then the result is clamped to [clamp[0], clamp[1]].
     """
     if mode == "draw-only":
-        val = draw_var
+        val = 1.0 / draw_var
     else:
         if grad_var is None:
             raise ValueError("grad_var is required when mode is 'grad'")
-        val = _sqrt_nonneg(draw_var / grad_var)
+        val = _sqrt_nonneg(grad_var / draw_var)
     return jnp.where(
         jnp.isfinite(val) & (val > 0.0),
         jnp.clip(val, clamp[0], clamp[1]),
@@ -242,10 +246,12 @@ class ParallelHMC:
             rtol               - relative residual tolerance for DEER early stopping
                                  (None = dtype default in deer.seq1d).
             adaptive_mass      - None: fixed identity mass (default). ``\"draw-only\"``: Welford
-                                 variance of draws only; M_ii = var_draw_i, clamped to [1e-20, 1e20];
+                                 variance of draws only; M_ii = 1 / var_draw_i, clamped to [1e-20, 1e20];
                                  packed dim 3D. ``\"grad\"``: Welford variances of draws and scores;
-                                 M_ii = sqrt(var_draw/var_grad), clamped to [1e-20, 1e20]; packed dim
-                                 5D. Non-finite or zero entries fall back to 1.0 (unit mass). For
+                                 M_ii = sqrt(var_grad/var_draw), clamped to [1e-20, 1e20]; packed dim
+                                 5D. Both choices estimate M ~= Sigma^{-1} so the dynamics are
+                                 preconditioned toward unit variance. Non-finite or zero entries fall
+                                 back to 1.0 (unit mass). For
                                  backward compatibility, ``True`` is treated as ``\"grad\"`` and
                                  ``False`` as None. The Welford sample count is *not* stored in the
                                  packed state; it is reconstructed from the chain index as

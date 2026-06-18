@@ -12,7 +12,7 @@
   "qmem_efficient": false,
   "clip_val": 1e8,
   "epsilon": 0.5,
-  "num_leapfrog_steps": 4,
+  "num_leapfrog_steps": 8,
   "mass_adapt_steps": 100,
   "welford_init": {
     "mean": "zeros",
