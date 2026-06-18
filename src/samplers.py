@@ -588,3 +588,135 @@ class ParallelHMC:
         #     else out_states
         # ), iters
         return out_states, iters
+
+    # ------------------------------------------------------------------ #
+    #   Decoupling experiment: HMC with an *exogenous* mass schedule.     #
+    #                                                                     #
+    #   The mass at each step is supplied as a per-step driver instead of #
+    #   being derived from carried Welford accumulators. This breaks the  #
+    #   position->variance->mass->position feedback loop, so DEER's       #
+    #   linearization treats the mass as a constant. Used to test whether #
+    #   the slow DEER convergence under adaptive mass is caused by that   #
+    #   feedback loop (vs. the mass values themselves making the per-step #
+    #   HMC map hard for DEER).                                           #
+    # ------------------------------------------------------------------ #
+    def _hmc_fixed_mass(self, position: jnp.ndarray, driver, params) -> jnp.ndarray:
+        """One HMC step with a diagonal mass supplied via the driver (no feedback).
+
+        ``driver`` is ``(seed, t, mass_diag)``. The position-update path is identical to
+        :meth:`_hmc_adaptive_mass` for the same ``(seed, mass_diag)``; the only difference
+        is that ``mass_diag`` is exogenous and no Welford accumulators are updated. The
+        state is positions only ``(D,)``.
+        """
+        D = self.D
+        step_size = params["epsilon"]
+        num_steps = params["num_leapfrog_steps"]
+        seed, _t, mass_diag = driver
+
+        momentum_seed, mh_seed = jr.split(seed)
+        momentum = _sample_momentum_diag_mass(mass_diag, momentum_seed, (D,))
+        tlp, tlp_grad = self.target_log_prob_and_grad(position)
+        energy = _kinetic_diag_mass(momentum, mass_diag) - tlp
+
+        momentum = momentum + 0.5 * step_size * tlp_grad
+        zm = jnp.concatenate((position, momentum))
+        zm = jax.lax.fori_loop(
+            0,
+            num_steps,
+            lambda _, s: self._scan_leapfrog_diag_mass(s, step_size, mass_diag),
+            zm,
+        )
+        new_position, new_momentum = jnp.split(zm, 2)
+        new_tlp, new_tlp_grad = self.target_log_prob_and_grad(new_position)
+        new_momentum = new_momentum - 0.5 * step_size * new_tlp_grad
+
+        new_energy = _kinetic_diag_mass(new_momentum, mass_diag) - new_tlp
+        log_accept_ratio = energy - new_energy
+
+        u = jr.uniform(mh_seed, [])
+        g = sigmoid_accept(log_accept_ratio - jnp.log(u))
+        new_position = g * new_position + (1.0 - g) * position
+        return new_position
+
+    def true_mass_schedule(
+        self,
+        states_seq_full: jnp.ndarray,
+        initial_state: jnp.ndarray,
+        mass_adapt_steps: int,
+    ) -> jnp.ndarray:
+        """Reconstruct the exact diagonal mass used at each step of the sequential chain.
+
+        The mass applied at step ``t`` is computed from the Welford accumulators of the
+        state that *enters* step ``t`` (i.e. ``y[t-1]``, with ``y[-1] = y0``) and the count
+        ``min(t, mass_adapt_steps)`` -- mirroring :meth:`_hmc_adaptive_mass`. Returns the
+        ``(chain_length, D)`` schedule that, fed to :meth:`_hmc_fixed_mass`, reproduces the
+        sequential positions exactly.
+        """
+        assert self.adaptive_mass is not None
+        mode = self.adaptive_mass
+        y0 = self._initial_packed_state(initial_state)
+        inputs = jnp.concatenate([y0[None, :], states_seq_full[:-1]], axis=0)
+        t = jnp.arange(self.chain_length)
+        count = jnp.minimum(t, mass_adapt_steps).astype(inputs.dtype)
+
+        def per_step(in_state, c):
+            unpacked = self._unpack_adaptive_state(in_state)
+            if mode == "draw-only":
+                _position, _mean, m2_draw = unpacked
+                draw_var = _variance_diag_from_welford(c, m2_draw)
+                return _adaptive_mass_diag("draw-only", draw_var)
+            _position, _mean_draw, m2_draw, _mean_grad, m2_grad = unpacked
+            draw_var = _variance_diag_from_welford(c, m2_draw)
+            grad_var = _variance_diag_from_welford(c, m2_grad)
+            return _adaptive_mass_diag("grad", draw_var, grad_var=grad_var)
+
+        return jax.vmap(per_step)(inputs, count)
+
+    def run_sequential_hmc_fixed_mass(
+        self, key, initial_state: jnp.ndarray, mass_schedule: jnp.ndarray, params
+    ) -> jnp.ndarray:
+        """Sequential positions-only chain driven by an exogenous ``mass_schedule`` (T, D)."""
+
+        def _fn_for_scan(state, driver):
+            nxt = self._hmc_fixed_mass(state, driver, params)
+            return nxt, nxt
+
+        drivers = (jr.split(key, (self.chain_length,)), jnp.arange(self.chain_length), mass_schedule)
+        _, out_states = jax.lax.scan(_fn_for_scan, initial_state, drivers)
+        return out_states
+
+    def run_parallel_hmc_fixed_mass(
+        self,
+        key,
+        initial_state: jnp.ndarray,
+        mass_schedule: jnp.ndarray,
+        init_trajectory_guess: jnp.ndarray,
+        params,
+    ):
+        """Parallel (DEER) positions-only solve with an exogenous ``mass_schedule`` (T, D)."""
+        deer_params = params
+        if self.quasi and self.qmem_efficient and "key" not in params:
+            key, qmem_key = jr.split(key)
+            deer_params = {**params, "key": qmem_key}
+        drivers = (
+            jr.split(key, (self.chain_length,)),
+            jnp.arange(self.chain_length),
+            mass_schedule,
+        )
+        out_states, iters = deer.seq1d(
+            func=self._hmc_fixed_mass,
+            y0=initial_state,
+            xinp=drivers,
+            params=deer_params,
+            init_trajectory_guess=init_trajectory_guess,
+            max_iter=self.max_iter,
+            quasi=self.quasi,
+            qmem_efficient=self.qmem_efficient,
+            clip_val=self.clip_val,
+            full_trace=self.full_trace,
+            damp_factor=self.damp_factor,
+            show_progress=self.show_progress,
+            tol=self.tol,
+            rtol=self.rtol,
+        )
+        return out_states, iters

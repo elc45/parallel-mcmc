@@ -1,0 +1,22 @@
+{
+  "target": "gaussian_2d",
+  "target_params": {},
+  "chain_length": 2000,
+  "random_seed": 123,
+  "initial_state_scale": 5.0,
+  "damp_factor": 0.55,
+  "tol": 0.001,
+  "rtol": 0.001,
+  "adaptive_mass": "draw-only",
+  "quasi": false,
+  "qmem_efficient": false,
+  "clip_val": 1e8,
+  "epsilon": 0.5,
+  "num_leapfrog_steps": 4,
+  "mass_adapt_steps": 100,
+  "welford_init": {
+    "mean": "zeros",
+    "m2": "zeros"
+  },
+  "welford_init_truth": true
+}

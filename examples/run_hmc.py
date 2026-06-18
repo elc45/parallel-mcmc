@@ -103,6 +103,27 @@ states_seq_full = run_sequential(key, initial_state, params)
 states_seq = states_seq_full[..., :D]
 
 init_trajectory_guess = initial_state[None, :] * jnp.ones((chain_length, D))
+
+# Experiment: seed the Welford accumulator slots of the initial parallel trajectory guess
+# with the *true* (sequential) accumulator trajectory, leaving the position slots at the
+# naive (constant initial_state) guess. This isolates whether DEER's slow convergence under
+# adaptive mass is driven by the accumulator/mass trajectory being wrong during the Newton
+# iterations: if handing it the true Welford trajectory collapses the iteration count, the
+# mass feedback is the bottleneck.
+welford_init_truth = bool(cfg.get("welford_init_truth", False))
+if welford_init_truth:
+    _mode = samplers._normalize_adaptive_mass(adaptive_mass)
+    if _mode is None:
+        raise ValueError("welford_init_truth=true requires adaptive_mass to be set")
+    welford_true = states_seq_full[:, D:]  # (chain_length, chain_state_dim - D)
+    init_trajectory_guess = jnp.concatenate(
+        [init_trajectory_guess, welford_true], axis=-1
+    )  # (chain_length, chain_state_dim)
+    print(
+        "welford_init_truth: seeded Welford slots of initial guess with sequential truth "
+        f"(packed guess shape {tuple(init_trajectory_guess.shape)})"
+    )
+
 max_iter = chain_length
 
 sampler = samplers.ParallelHMC(
