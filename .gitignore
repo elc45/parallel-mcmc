@@ -7,6 +7,7 @@ examples/hmc_runs/.DS_Store
 !Q.npy
 *.png
 hmc_runs/
+mala_runs/
 *.DS_Store
 analysis.ipynb
 examples/hmc_fixed_mass_runs/README.md

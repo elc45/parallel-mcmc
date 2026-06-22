@@ -726,3 +726,133 @@ class ParallelHMC:
             rtol=self.rtol,
         )
         return out_states, iters
+
+
+class ParallelMALA(ParallelHMC):
+    """Parallel MALA (Metropolis-adjusted Langevin) with the same diagonal adaptive mass.
+
+    MALA is the single-step Langevin special case of HMC: each step makes one preconditioned
+    Langevin proposal and applies a Metropolis correction, with no momentum carried between
+    steps. The diagonal mass ``M`` plays the role of the *inverse* preconditioner
+    (``A = M^{-1}``), matching :class:`ParallelHMC`'s convention (``M ~= Sigma^{-1}`` preconditions
+    the target toward unit variance); it is adapted online from the same Welford accumulators.
+    All packing, Welford, initial-guess, and DEER plumbing is inherited from
+    :class:`ParallelHMC`; only the per-step transition differs.
+
+    For current point ``x``, preconditioner ``A = M^{-1}`` and step ``eps`` the proposal is
+
+        y = x + (eps^2 / 2) A grad_logp(x) + eps sqrt(A) xi,   xi ~ N(0, I),
+
+    i.e. ``y ~ N(x + (eps^2 / 2) A grad_logp(x), eps^2 A)``, accepted with the standard MALA
+    Metropolis-Hastings ratio. ``num_leapfrog_steps`` is ignored (MALA is a single step).
+    """
+
+    def _mala_propose_accept(self, position, mass_diag, seed, step_size):
+        """One MALA proposal + Metropolis step at fixed diagonal ``mass_diag`` (= M).
+
+        Returns ``(new_position, grad_at_new)`` where the gradient is the accept/reject blend of
+        the score at the proposal and at the current point (used by the ``grad`` Welford
+        accumulator, mirroring :meth:`ParallelHMC._hmc_adaptive_mass`).
+        """
+        precond = 1.0 / mass_diag  # A = M^{-1}: the MALA preconditioner
+        prop_seed, mh_seed = jr.split(seed)
+
+        tlp_x, grad_x = self.target_log_prob_and_grad(position)
+        drift_x = position + 0.5 * step_size**2 * precond * grad_x
+        noise = step_size * jnp.sqrt(precond) * jr.normal(prop_seed, position.shape)
+        proposal = drift_x + noise
+
+        tlp_y, grad_y = self.target_log_prob_and_grad(proposal)
+        drift_y = proposal + 0.5 * step_size**2 * precond * grad_y
+
+        # Gaussian proposal log-density up to the forward/backward-shared normalizer:
+        #   q(b | a) ~ exp( -(1 / (2 eps^2)) sum_d M_d (b_d - drift_a,d)^2 ),
+        # so the M- and eps-dependent constant cancels in the forward-minus-backward difference.
+        inv_cov = mass_diag / (step_size**2)
+        log_q_fwd = -0.5 * jnp.sum(inv_cov * (proposal - drift_x) ** 2)
+        log_q_bwd = -0.5 * jnp.sum(inv_cov * (position - drift_y) ** 2)
+        log_accept_ratio = (tlp_y - tlp_x) + (log_q_bwd - log_q_fwd)
+
+        u = jr.uniform(mh_seed, [])
+        g = sigmoid_accept(log_accept_ratio - jnp.log(u))
+        new_position = g * proposal + (1.0 - g) * position
+        grad_new = g * grad_y + (1.0 - g) * grad_x
+        return new_position, grad_new
+
+    def _mala_adaptive_mass(self, packed_state, driver, params):
+        """One MALA step with diagonal adaptive mass; packed layout follows ``self.adaptive_mass``."""
+        step_size = params["epsilon"]
+        seed, t = driver
+        mode = self.adaptive_mass
+        assert mode is not None
+        mass_adapt_steps = params.get("mass_adapt_steps", 100)
+
+        unpacked = self._unpack_adaptive_state(packed_state)
+        if mode == "draw-only":
+            position, mean_draw, m2_draw = unpacked
+        else:
+            position, mean_draw, m2_draw, mean_grad, m2_grad = unpacked
+
+        # count mirrors ParallelHMC: adaptation gated by t < mass_adapt_steps => count = min(t, .).
+        count = jnp.minimum(t, mass_adapt_steps).astype(position.dtype)
+        draw_var = _variance_diag_from_welford(count, m2_draw)
+        if mode == "draw-only":
+            mass_diag = _adaptive_mass_diag("draw-only", draw_var)
+        else:
+            grad_var = _variance_diag_from_welford(count, m2_grad)
+            mass_diag = _adaptive_mass_diag("grad", draw_var, grad_var=grad_var)
+
+        new_position, grad_new = self._mala_propose_accept(
+            position, mass_diag, seed, step_size
+        )
+
+        do_adapt = t < mass_adapt_steps
+        if mode == "draw-only":
+            _, mean_n, m2_n = jax.lax.cond(
+                do_adapt,
+                lambda _: _welford_update_diag(count, mean_draw, m2_draw, new_position),
+                lambda _: (count, mean_draw, m2_draw),
+                operand=None,
+            )
+            return _pack_draw_only(new_position, mean_n, m2_n)
+
+        _, mean_draw_n, m2_draw_n = jax.lax.cond(
+            do_adapt,
+            lambda _: _welford_update_diag(count, mean_draw, m2_draw, new_position),
+            lambda _: (count, mean_draw, m2_draw),
+            operand=None,
+        )
+        _, mean_grad_n, m2_grad_n = jax.lax.cond(
+            do_adapt,
+            lambda _: _welford_update_diag(count, mean_grad, m2_grad, grad_new),
+            lambda _: (count, mean_grad, m2_grad),
+            operand=None,
+        )
+        return _pack_adaptive_state(
+            new_position, mean_draw_n, m2_draw_n, mean_grad_n, m2_grad_n
+        )
+
+    def mala_fn_for_deer(self, state, driver, params):
+        """MALA transition used by DEER and the sequential scan (dispatches on ``adaptive_mass``)."""
+        if self.adaptive_mass is not None:
+            return self._mala_adaptive_mass(state, driver, params)
+        seed, _t = driver
+        step_size = params["epsilon"]
+        mass_diag = jnp.ones((self.D,), dtype=state.dtype)
+        new_position, _ = self._mala_propose_accept(state, mass_diag, seed, step_size)
+        return new_position
+
+    # The inherited sequential/parallel runners call ``hmc_fn_for_deer``; route it to MALA so all
+    # of ParallelHMC's plumbing (packing, init guess, DEER solve) is reused unchanged.
+    def hmc_fn_for_deer(self, state, driver, params):
+        return self.mala_fn_for_deer(state, driver, params)
+
+    # Clearly named public wrappers (delegate to the inherited, now MALA-routed, runners).
+    def run_sequential_mala(self, key, initial_state, params):
+        return self.run_sequential_hmc(key, initial_state, params)
+
+    def run_sequential_mala_full(self, key, initial_state, params):
+        return self.run_sequential_hmc_full(key, initial_state, params)
+
+    def run_parallel_mala(self, key, initial_state, init_trajectory_guess, params):
+        return self.run_parallel_hmc(key, initial_state, init_trajectory_guess, params)
