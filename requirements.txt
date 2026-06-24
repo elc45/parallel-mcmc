@@ -11,5 +11,6 @@ tensorflow-probability==0.24.0
 tensorflow-datasets==4.9.9
 inference_gym==0.0.5
 matplotlib
+imageio
 jaxtyping
 tqdm
