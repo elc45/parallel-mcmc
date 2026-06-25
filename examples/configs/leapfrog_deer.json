@@ -1,0 +1,14 @@
+{
+  "target": "gaussian_10d",
+  "target_params": {},
+  "sweep_max": 512,
+  "step_size": 0.1,
+  "random_seed": 123,
+  "initial_position_scale": 10.0,
+  "damp_factor": 0.55,
+  "tol": 0.001,
+  "rtol": 0.001,
+  "quasi": true,
+  "qmem_efficient": false,
+  "clip_val": 1e8
+}

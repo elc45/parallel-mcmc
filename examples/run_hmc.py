@@ -200,15 +200,18 @@ if __name__ == "__main__":
             m2_arr,
             run_dir / "mass_matrix_trace.gif",
             count=count_arr,
+            max_newton_iter=int(iters),
         )
         hmc_plot.position_convergence_gif(
             position_arr,
             run_dir / "trace.gif",
+            max_newton_iter=int(iters),
         )
     else:
         hmc_plot.position_convergence_gif(
             states_par_np,
             run_dir / "trace.gif",
+            max_newton_iter=int(iters),
         )
 
     print(f"Saved config, plots, states_par.npy, states_seq.npy, and GIFs under {run_dir}")

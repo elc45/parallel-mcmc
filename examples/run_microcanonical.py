@@ -21,7 +21,7 @@ jax.config.update("jax_enable_x64", True)
 jax.config.update("jax_default_matmul_precision", "highest")
 
 DEFAULT_CONFIG_PATH = _EXAMPLES_DIR / "configs" / "gaussian_10d_mclmc.json"
-RUNS_PARENT = _EXAMPLES_DIR / "mclmc_runs"
+RUNS_PARENT = _EXAMPLES_DIR / "microcanonical_runs"
 
 _SHOW_DEER_PROGRESS = __name__ == "__main__"
 
@@ -37,7 +37,7 @@ def _next_run_dir(runs_parent: Path) -> Path:
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run parallel MCLMC (BlackJAX) with DEER."
+        description="Run parallel microcanonical (isokinetic leapfrog, no refresh) with DEER."
     )
     parser.add_argument(
         "--config",
@@ -56,7 +56,9 @@ with open(config_path) as f:
 target = load_target(cfg["target"], cfg.get("target_params"))
 D = target.dim
 if D < 2:
-    raise ValueError(f"MCLMC requires dimension >= 2; target {cfg['target']} has D={D}.")
+    raise ValueError(
+        f"Microcanonical dynamics requires dimension >= 2; target {cfg['target']} has D={D}."
+    )
 target_log_prob = target.log_prob
 
 chain_length = cfg["chain_length"]
@@ -73,11 +75,10 @@ initial_state = 0.0 + float(cfg["initial_state_scale"]) * jr.normal(skey, (D,))
 max_iter = chain_length
 
 params = {
-    "L": float(cfg.get("L", 5.0)),
     "step_size": float(cfg.get("step_size", 0.1)),
 }
 
-sampler = samplers.ParallelMCLMC(
+sampler = samplers.ParallelMicrocanonical(
     target_log_prob,
     D,
     chain_length,
@@ -92,12 +93,12 @@ sampler = samplers.ParallelMCLMC(
     clip_val=clip_val,
 )
 
-run_sequential = jax.jit(sampler.run_sequential_mclmc)
+run_sequential = jax.jit(sampler.run_sequential_microcanonical)
 states_seq = run_sequential(key, initial_state, params)
 
 init_trajectory_guess = initial_state[None, :] * jnp.ones((chain_length, D))
 
-sampler = samplers.ParallelMCLMC(
+sampler = samplers.ParallelMicrocanonical(
     target_log_prob,
     dim=D,
     chain_length=chain_length,
@@ -112,8 +113,8 @@ sampler = samplers.ParallelMCLMC(
     clip_val=clip_val,
 )
 
-print("Running parallel MCLMC with full trace for visualization")
-run_parallel = jax.jit(sampler.run_parallel_mclmc)
+print("Running parallel microcanonical dynamics with full trace for visualization")
+run_parallel = jax.jit(sampler.run_parallel_microcanonical)
 states_par_packed, iters = run_parallel(
     key, initial_state, init_trajectory_guess, params
 )
@@ -143,14 +144,14 @@ if __name__ == "__main__":
         states_par,
         rtol=rtol,
         savepath=plot_newton,
-        title=f"DEER Newton error ({target.name}, MCLMC)",
+        title=f"DEER Newton error ({target.name}, microcanonical)",
     )
     hmc_plot.newton_truth_error_plot(
         states_par,
         states_seq,
         dim=D,
         savepath=plot_newton_truth,
-        title=f"Parallel-vs-sequential trajectory error ({target.name}, MCLMC)",
+        title=f"Parallel-vs-sequential trajectory error ({target.name}, microcanonical)",
     )
 
     states_par_np = np.asarray(jax.device_get(states_par))

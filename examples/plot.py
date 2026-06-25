@@ -346,6 +346,7 @@ def mass_matrix_convergence_gif(
     savepath: Path | str,
     *,
     count: np.ndarray,
+    max_newton_iter: int | None = None,
     step: int = 5,
     duration: float = 0.005,
 ) -> None:
@@ -363,6 +364,9 @@ def mass_matrix_convergence_gif(
         Welford sample count from the packed chain state, shape
         ``(num_newton_iters, chain_length)``. Must be used (not the chain index) so
         that frozen mass after warmup appears flat in the plot.
+    max_newton_iter
+        If set, only animate through this Newton iteration (inclusive), dropping
+        redundant post-convergence iterates.
     step
         Sample every ``step`` Newton iterations for animation frames.
     duration
@@ -372,6 +376,10 @@ def mass_matrix_convergence_gif(
 
     m2_draw = np.asarray(m2_draw)
     count = np.asarray(count)
+    if max_newton_iter is not None:
+        n_keep = min(int(max_newton_iter) + 1, m2_draw.shape[0])
+        m2_draw = m2_draw[:n_keep]
+        count = count[:n_keep]
     num_newton_iters, chain_length, D = m2_draw.shape
     gif_frames = []
 
@@ -401,6 +409,7 @@ def position_convergence_gif(
     position: np.ndarray,
     savepath: Path | str,
     *,
+    max_newton_iter: int | None = None,
     step: int = 10,
     duration: float = 0.005,
 ) -> None:
@@ -412,6 +421,9 @@ def position_convergence_gif(
         Position array, shape ``(num_newton_iters, chain_length, D)``.
     savepath
         Output path for the GIF file.
+    max_newton_iter
+        If set, only animate through this Newton iteration (inclusive), dropping
+        redundant post-convergence iterates.
     step
         Sample every ``step`` Newton iterations for animation frames.
     duration
@@ -420,6 +432,8 @@ def position_convergence_gif(
     import imageio
 
     position = np.asarray(position)
+    if max_newton_iter is not None:
+        position = position[: min(int(max_newton_iter) + 1, position.shape[0])]
     num_newton_iters, chain_length, D = position.shape
     gif_frames = []
 

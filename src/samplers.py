@@ -724,3 +724,297 @@ class ParallelMCLMC:
             rtol=self.rtol,
         )
         return out_states, iters
+
+
+class ParallelMicrocanonical:
+    """Parallel DEER with deterministic isokinetic (microcanonical) integrator steps.
+
+    Same single-step dynamics as BlackJAX MCLMC (``isokinetic_mclachlan``) but without
+    the partial momentum refresh that ``with_isokinetic_maruyama`` applies around each step.
+    """
+
+    def __init__(
+        self,
+        log_prob: Callable,
+        dim: int,
+        chain_length: int,
+        max_iter: int,
+        alg: str = "quasi",
+        quasi: bool = True,
+        qmem_efficient: bool = False,
+        clip_val: float = 1.0,
+        damp_factor: float = 1.0,
+        full_trace: bool = False,
+        show_progress: bool = False,
+        tol: float | None = None,
+        rtol: float | None = None,
+        inverse_mass_matrix=1.0,
+    ):
+        if dim < 2:
+            raise ValueError("Microcanonical dynamics requires target dimension >= 2.")
+        from blackjax.mcmc.integrators import IntegratorState, isokinetic_mclachlan
+        from blackjax.mcmc.mclmc import init as mclmc_init
+
+        self._IntegratorState = IntegratorState
+
+        self.log_prob = log_prob
+        self.D = dim
+        self.chain_length = chain_length
+        self.max_iter = max_iter
+        self.alg = alg
+        self.quasi = quasi
+        self.qmem_efficient = qmem_efficient
+        self.clip_val = clip_val
+        self.damp_factor = damp_factor
+        self.full_trace = full_trace
+        self.show_progress = show_progress
+        self.tol = tol
+        self.rtol = rtol
+        self.inverse_mass_matrix = inverse_mass_matrix
+        self.chain_state_dim = _mclmc_packed_state_dim(dim)
+        self.target_log_prob_and_grad = jax.value_and_grad(self.log_prob)
+        self._mclmc_init = mclmc_init
+        self._integrator = isokinetic_mclachlan(
+            logdensity_fn=self.log_prob,
+            inverse_mass_matrix=self.inverse_mass_matrix,
+        )
+
+    def _unpack_integrator_state(self, packed: jnp.ndarray):
+        D = self.D
+        position = packed[:D]
+        momentum = packed[D : 2 * D]
+        logdensity, logdensity_grad = self.target_log_prob_and_grad(position)
+        return self._IntegratorState(position, momentum, logdensity, logdensity_grad)
+
+    def _initial_packed_state(self, position: jnp.ndarray, key) -> jnp.ndarray:
+        state = self._mclmc_init(position, self.log_prob, key)
+        return _pack_mclmc_state(state.position, state.momentum)
+
+    def _pack_init_trajectory_guess(self, y_positions: jnp.ndarray) -> jnp.ndarray:
+        T, D = y_positions.shape
+        zeros = jnp.zeros((T, D), dtype=y_positions.dtype)
+        return jnp.concatenate([y_positions, zeros], axis=-1)
+
+    def _positions_only(self, states: jnp.ndarray) -> jnp.ndarray:
+        return states[..., : self.D]
+
+    def microcanonical_fn_for_deer(self, state, driver, params):
+        del driver
+        integrator_state = self._unpack_integrator_state(state)
+        step_size = params["step_size"]
+        new_state, _kinetic_change = self._integrator(integrator_state, step_size)
+        return _pack_mclmc_state(new_state.position, new_state.momentum)
+
+    def _run_sequential_packed(self, key, initial_state, params):
+        def _fn_for_scan(state, driver):
+            nxt = self.microcanonical_fn_for_deer(state, driver, params)
+            return nxt, nxt
+
+        init_key, scan_key = jr.split(key)
+        drivers = (jr.split(scan_key, (self.chain_length,)), jnp.arange(self.chain_length))
+        init = self._initial_packed_state(initial_state, init_key)
+        _, out_states = jax.lax.scan(_fn_for_scan, init, drivers)
+        return out_states
+
+    def run_sequential_microcanonical(self, key, initial_state, params):
+        out_states = self._run_sequential_packed(key, initial_state, params)
+        return self._positions_only(out_states)
+
+    def run_sequential_microcanonical_full(self, key, initial_state, params):
+        return self._run_sequential_packed(key, initial_state, params)
+
+    def run_parallel_microcanonical(
+        self, key, initial_state, init_trajectory_guess, params
+    ):
+        deer_params = params
+        if self.quasi and self.qmem_efficient and "key" not in params:
+            key, qmem_key = jr.split(key)
+            deer_params = {**params, "key": qmem_key}
+        init_key, chain_key = jr.split(key)
+        drivers = (jr.split(chain_key, (self.chain_length,)), jnp.arange(self.chain_length))
+        y0 = self._initial_packed_state(initial_state, init_key)
+        if init_trajectory_guess is not None:
+            if init_trajectory_guess.shape[-1] == self.D:
+                init_trajectory_guess = self._pack_init_trajectory_guess(
+                    init_trajectory_guess
+                )
+
+        out_states, iters = deer.seq1d(
+            func=self.microcanonical_fn_for_deer,
+            y0=y0,
+            xinp=drivers,
+            params=deer_params,
+            init_trajectory_guess=init_trajectory_guess,
+            max_iter=self.max_iter,
+            quasi=self.quasi,
+            qmem_efficient=self.qmem_efficient,
+            clip_val=self.clip_val,
+            full_trace=self.full_trace,
+            damp_factor=self.damp_factor,
+            show_progress=self.show_progress,
+            tol=self.tol,
+            rtol=self.rtol,
+        )
+        return out_states, iters
+
+
+def _partially_refresh_gaussian_momentum(
+    momentum: jnp.ndarray, key, step_size: float, L: float
+) -> jnp.ndarray:
+    """Ornstein-Uhlenbeck momentum refresh (Euclidean / underdamped Langevin)."""
+    rho = jnp.exp(-step_size / L)
+    coef = jnp.sqrt(1.0 - rho**2)
+    noise = jr.normal(key, momentum.shape, dtype=momentum.dtype)
+    refreshed = rho * momentum + coef * noise
+    return jax.lax.cond(jnp.isinf(L), lambda _: momentum, lambda _: refreshed, None)
+
+
+def _with_euclidean_maruyama(integrator):
+    """Wrap a symplectic integrator with pre/post Gaussian momentum refresh."""
+
+    def stochastic_step(init_state, step_size, L, rng_key):
+        key1, key2 = jr.split(rng_key)
+        momentum = _partially_refresh_gaussian_momentum(
+            init_state.momentum, key1, step_size * 0.5, L
+        )
+        state = integrator(init_state._replace(momentum=momentum), step_size)
+        momentum = _partially_refresh_gaussian_momentum(
+            state.momentum, key2, step_size * 0.5, L
+        )
+        return state._replace(momentum=momentum)
+
+    return stochastic_step
+
+
+class ParallelLangevin:
+    """Parallel DEER with Euclidean Hamiltonian leapfrog and partial momentum refresh.
+
+    One velocity-Verlet step per chain transition, with Ornstein-Uhlenbeck momentum
+    refresh before and after (same structure as MCLMC's ``with_isokinetic_maruyama``,
+    but for standard Gaussian-momentum Hamiltonian dynamics).
+    """
+
+    def __init__(
+        self,
+        log_prob: Callable,
+        dim: int,
+        chain_length: int,
+        max_iter: int,
+        alg: str = "quasi",
+        quasi: bool = True,
+        qmem_efficient: bool = False,
+        clip_val: float = 1.0,
+        damp_factor: float = 1.0,
+        full_trace: bool = False,
+        show_progress: bool = False,
+        tol: float | None = None,
+        rtol: float | None = None,
+        inverse_mass_matrix=1.0,
+    ):
+        from blackjax.mcmc.integrators import IntegratorState, velocity_verlet
+        from blackjax.mcmc.metrics import gaussian_euclidean
+
+        self._IntegratorState = IntegratorState
+
+        self.log_prob = log_prob
+        self.D = dim
+        self.chain_length = chain_length
+        self.max_iter = max_iter
+        self.alg = alg
+        self.quasi = quasi
+        self.qmem_efficient = qmem_efficient
+        self.clip_val = clip_val
+        self.damp_factor = damp_factor
+        self.full_trace = full_trace
+        self.show_progress = show_progress
+        self.tol = tol
+        self.rtol = rtol
+        self.inverse_mass_matrix = inverse_mass_matrix
+        self.chain_state_dim = _mclmc_packed_state_dim(dim)
+        self.target_log_prob_and_grad = jax.value_and_grad(self.log_prob)
+        mass = (
+            inverse_mass_matrix
+            if jnp.ndim(inverse_mass_matrix) > 0
+            else jnp.ones(dim, dtype=jnp.float64)
+        )
+        kinetic_energy_fn = gaussian_euclidean(mass).kinetic_energy
+        self._integrator = _with_euclidean_maruyama(
+            velocity_verlet(self.log_prob, kinetic_energy_fn)
+        )
+
+    def _unpack_integrator_state(self, packed: jnp.ndarray):
+        D = self.D
+        position = packed[:D]
+        momentum = packed[D : 2 * D]
+        logdensity, logdensity_grad = self.target_log_prob_and_grad(position)
+        return self._IntegratorState(position, momentum, logdensity, logdensity_grad)
+
+    def _initial_packed_state(self, position: jnp.ndarray, key) -> jnp.ndarray:
+        momentum = jr.normal(key, (self.D,), dtype=position.dtype)
+        return _pack_mclmc_state(position, momentum)
+
+    def _pack_init_trajectory_guess(self, y_positions: jnp.ndarray) -> jnp.ndarray:
+        T, D = y_positions.shape
+        zeros = jnp.zeros((T, D), dtype=y_positions.dtype)
+        return jnp.concatenate([y_positions, zeros], axis=-1)
+
+    def _positions_only(self, states: jnp.ndarray) -> jnp.ndarray:
+        return states[..., : self.D]
+
+    def langevin_fn_for_deer(self, state, driver, params):
+        seed, _t = driver
+        integrator_state = self._unpack_integrator_state(state)
+        L = params["L"]
+        step_size = params["step_size"]
+        new_state = self._integrator(integrator_state, step_size, L, seed)
+        return _pack_mclmc_state(new_state.position, new_state.momentum)
+
+    def _run_sequential_packed(self, key, initial_state, params):
+        def _fn_for_scan(state, driver):
+            nxt = self.langevin_fn_for_deer(state, driver, params)
+            return nxt, nxt
+
+        init_key, scan_key = jr.split(key)
+        drivers = (jr.split(scan_key, (self.chain_length,)), jnp.arange(self.chain_length))
+        init = self._initial_packed_state(initial_state, init_key)
+        _, out_states = jax.lax.scan(_fn_for_scan, init, drivers)
+        return out_states
+
+    def run_sequential_langevin(self, key, initial_state, params):
+        out_states = self._run_sequential_packed(key, initial_state, params)
+        return self._positions_only(out_states)
+
+    def run_sequential_langevin_full(self, key, initial_state, params):
+        return self._run_sequential_packed(key, initial_state, params)
+
+    def run_parallel_langevin(self, key, initial_state, init_trajectory_guess, params):
+        deer_params = params
+        if self.quasi and self.qmem_efficient and "key" not in params:
+            key, qmem_key = jr.split(key)
+            deer_params = {**params, "key": qmem_key}
+        init_key, chain_key = jr.split(key)
+        drivers = (jr.split(chain_key, (self.chain_length,)), jnp.arange(self.chain_length))
+        y0 = self._initial_packed_state(initial_state, init_key)
+        if init_trajectory_guess is not None:
+            if init_trajectory_guess.shape[-1] == self.D:
+                init_trajectory_guess = self._pack_init_trajectory_guess(
+                    init_trajectory_guess
+                )
+
+        out_states, iters = deer.seq1d(
+            func=self.langevin_fn_for_deer,
+            y0=y0,
+            xinp=drivers,
+            params=deer_params,
+            init_trajectory_guess=init_trajectory_guess,
+            max_iter=self.max_iter,
+            quasi=self.quasi,
+            qmem_efficient=self.qmem_efficient,
+            clip_val=self.clip_val,
+            full_trace=self.full_trace,
+            damp_factor=self.damp_factor,
+            show_progress=self.show_progress,
+            tol=self.tol,
+            rtol=self.rtol,
+        )
+        return out_states, iters
