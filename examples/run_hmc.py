@@ -164,7 +164,8 @@ if __name__ == "__main__":
     # are identical copies). Trim those redundant trailing iterates before saving: keep the
     # initial guess (index 0) through the converged iterate (index `iters`).
     n_keep = min(int(iters) + 1, states_par_np.shape[0])
-    np.save(run_dir / "states_par.npy", states_par_np[:n_keep])
+    states_par_converged = states_par_np[:n_keep]
+    np.save(run_dir / "states_par.npy", states_par_converged)
 
     states_seq_np = np.asarray(jax.device_get(states_seq))
     np.save(run_dir / "states_seq.npy", states_seq_np)
@@ -175,7 +176,7 @@ if __name__ == "__main__":
     mass_adapt_steps = params["mass_adapt_steps"]
     if adaptive_mass_mode is not None:
         # Reconstruct diagonal mass matrices and compare parallel Newton iterates to truth.
-        mass_par = mass_diag_trajectory(states_par_np, D, adaptive_mass_mode, mass_adapt_steps)
+        mass_par = mass_diag_trajectory(states_par_converged, D, adaptive_mass_mode, mass_adapt_steps)
         mass_seq = mass_diag_trajectory(states_seq_full_np, D, adaptive_mass_mode, mass_adapt_steps)
         np.save(run_dir / "mass_matrix_seq.npy", mass_seq)
         hmc_plot.newton_mass_truth_error_plot(
@@ -188,12 +189,12 @@ if __name__ == "__main__":
 
     print("Creating GIFs...")
     if adaptive_mass_mode is not None:
-        unpacked = unpack_adaptive_state_trajectory(states_par_np, D, adaptive_mass_mode)
+        unpacked = unpack_adaptive_state_trajectory(states_par_converged, D, adaptive_mass_mode)
         position_arr = unpacked[0]
         m2_arr = unpacked[2]
         # count is no longer stored in the state; reconstruct it (identical across Newton
         # iterates) and broadcast to (num_newton_iters, chain_length) for the GIF.
-        num_newton_iters, chain_len = states_par_np.shape[0], states_par_np.shape[1]
+        num_newton_iters, chain_len = states_par_converged.shape[0], states_par_converged.shape[1]
         count_1d = welford_count_trajectory(chain_len, mass_adapt_steps)
         count_arr = np.broadcast_to(count_1d, (num_newton_iters, chain_len))
         hmc_plot.mass_matrix_convergence_gif(
@@ -207,7 +208,7 @@ if __name__ == "__main__":
         )
     else:
         hmc_plot.position_convergence_gif(
-            states_par_np,
+            states_par_converged,
             run_dir / "trace.gif",
         )
 
