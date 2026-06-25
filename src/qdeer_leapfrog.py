@@ -368,7 +368,6 @@ def block_diagonal_deer_iteration_helper(
         # yt: (T, D)
         ytparams = shifter_func(yt, shifter_func_params)
         if qmem_efficient:
-            print("efficient")
             gts = [
                -jax.vmap(leapfrog_derivative_diag_blocks_mem, in_axes=(0, 0, None, None, 0))(
                    ytparams[0], xinput, params, hvp, keys

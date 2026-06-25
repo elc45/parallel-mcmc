@@ -1,0 +1,11 @@
+{
+  "target": "blr_german_credit",
+  "target_params": {},
+  "num_leapfrog_steps": 2048,
+  "epsilon": 0.1,
+  "random_seed": 42,
+  "initial_position_scale": 1.0,
+  "initial_momentum_scale": 1.0,
+  "tol": 0.001,
+  "rtol": 0.001
+}

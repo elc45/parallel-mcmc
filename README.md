@@ -25,6 +25,10 @@ examples/               Example scripts
   ```
   python examples/run_hmc_rosenbrock.py
   ```
+- **`examples/run_leapfrog_deer.py`** - Benchmarks full-Jacobian DEER on a fixed leapfrog trajectory (no MCMC).
+  ```
+  python examples/run_leapfrog_deer.py --config examples/configs/leapfrog_deer.json
+  ```
 
 ## Citation
 
