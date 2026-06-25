@@ -14,3 +14,5 @@ matplotlib
 imageio
 jaxtyping
 tqdm
+blackjax==1.2.5
+optax==0.2.2

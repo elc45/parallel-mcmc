@@ -7,11 +7,9 @@
   "damp_factor": 0.55,
   "tol": 0.001,
   "rtol": 0.001,
-  "adaptive_mass": "draw-only",
   "quasi": true,
   "qmem_efficient": false,
   "clip_val": 1e8,
-  "epsilon": 0.5,
-  "num_leapfrog_steps": 8,
-  "mass_adapt_steps": 100
+  "L": 5.0,
+  "step_size": 0.1
 }
