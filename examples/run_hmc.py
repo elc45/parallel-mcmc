@@ -140,7 +140,7 @@ if __name__ == "__main__":
         states_par,
         states_seq,
         initial_state,
-        [1, 10, (max_iter//2), max_iter],
+        hmc_plot.progress_newton_iterations(int(iters)),
         chain_length=chain_length,
         quasi=quasi,
         savepath=plot_progress,

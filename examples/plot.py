@@ -229,6 +229,14 @@ def newton_mass_truth_error_plot(
     return fig, ax
 
 
+def progress_newton_iterations(converged_iter: int) -> list[int]:
+    """Newton indices for the 4-panel progress figure: 1, x/3, 2x/3, converged x."""
+    x = int(converged_iter)
+    if x < 1:
+        return [0, 0, 0, 0]
+    return [1, max(1, x // 3), max(1, 2 * x // 3), x]
+
+
 def progress_plot(
     states_par: jnp.ndarray,
     states_seq: jnp.ndarray,
@@ -257,7 +265,7 @@ def progress_plot(
     initial_state
         Shape ``(D_or_packed,)`` — starting point; scatter in red on each panel.
     newton_iterations
-        Newton indices to plot (same convention as the original script, e.g. ``[1, 10, 25, max_iter]``).
+        Newton indices to plot (e.g. from :func:`progress_newton_iterations`).
     chain_length, quasi
         Used only if ``suptitle`` is ``None`` to build a default suptitle.
     ix, iy
