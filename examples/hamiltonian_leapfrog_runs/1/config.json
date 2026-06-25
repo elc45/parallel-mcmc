@@ -1,5 +1,5 @@
 {
-  "target": "gaussian_2d",
+  "target": "gaussian_10d",
   "target_params": {},
   "chain_length": 5000,
   "random_seed": 123,
@@ -7,9 +7,8 @@
   "damp_factor": 0.55,
   "tol": 0.001,
   "rtol": 0.001,
-  "quasi": false,
+  "quasi": true,
   "qmem_efficient": false,
   "clip_val": 1e8,
-  "L": 5.0,
   "step_size": 0.1
 }

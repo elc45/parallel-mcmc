@@ -1,3 +1,13 @@
+"""Run DEER on deterministic Euclidean Hamiltonian leapfrog (ordinary HMC dynamics).
+
+One velocity-Verlet step per chain transition, no momentum refresh, no Metropolis
+accept/reject. Parallel trajectory solved with DEER; outputs progress plots and GIF.
+
+Run:
+    python examples/run_hamiltonian_leapfrog_deer.py
+    python examples/run_hamiltonian_leapfrog_deer.py --config examples/configs/hamiltonian_leapfrog_deer.json
+"""
+
 import argparse
 import json
 import shutil
@@ -20,8 +30,8 @@ from targets import load_target
 jax.config.update("jax_enable_x64", True)
 jax.config.update("jax_default_matmul_precision", "highest")
 
-DEFAULT_CONFIG_PATH = _EXAMPLES_DIR / "configs" / "gaussian_10d_mclmc.json"
-RUNS_PARENT = _EXAMPLES_DIR / "microcanonical_runs"
+DEFAULT_CONFIG_PATH = _EXAMPLES_DIR / "configs" / "hamiltonian_leapfrog_deer.json"
+RUNS_PARENT = _EXAMPLES_DIR / "hamiltonian_leapfrog_runs"
 
 _SHOW_DEER_PROGRESS = __name__ == "__main__"
 
@@ -36,14 +46,12 @@ def _next_run_dir(runs_parent: Path) -> Path:
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Run parallel microcanonical (isokinetic leapfrog, no refresh) with DEER."
-    )
+    parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--config",
         type=Path,
         default=DEFAULT_CONFIG_PATH,
-        help="Path to JSON run config (default: examples/configs/gaussian_10d_mclmc.json).",
+        help="Path to JSON run config.",
     )
     return parser.parse_args()
 
@@ -55,10 +63,6 @@ with open(config_path) as f:
 
 target = load_target(cfg["target"], cfg.get("target_params"))
 D = target.dim
-if D < 2:
-    raise ValueError(
-        f"Microcanonical dynamics requires dimension >= 2; target {cfg['target']} has D={D}."
-    )
 target_log_prob = target.log_prob
 
 chain_length = cfg["chain_length"]
@@ -75,10 +79,10 @@ initial_state = 0.0 + float(cfg["initial_state_scale"]) * jr.normal(skey, (D,))
 max_iter = chain_length
 
 params = {
-    "step_size": float(cfg.get("step_size", 0.1)),
+    "step_size": float(cfg.get("step_size", cfg.get("epsilon", 0.1))),
 }
 
-sampler = samplers.ParallelMicrocanonical(
+sampler = samplers.ParallelHamiltonianLeapfrog(
     target_log_prob,
     D,
     chain_length,
@@ -93,12 +97,12 @@ sampler = samplers.ParallelMicrocanonical(
     clip_val=clip_val,
 )
 
-run_sequential = jax.jit(sampler.run_sequential_microcanonical)
+run_sequential = jax.jit(sampler.run_sequential_hamiltonian_leapfrog)
 states_seq = run_sequential(key, initial_state, params)
 
 init_trajectory_guess = initial_state[None, :] * jnp.ones((chain_length, D))
 
-sampler = samplers.ParallelMicrocanonical(
+sampler = samplers.ParallelHamiltonianLeapfrog(
     target_log_prob,
     dim=D,
     chain_length=chain_length,
@@ -113,8 +117,8 @@ sampler = samplers.ParallelMicrocanonical(
     clip_val=clip_val,
 )
 
-print("Running parallel microcanonical dynamics with full trace for visualization")
-run_parallel = jax.jit(sampler.run_parallel_microcanonical)
+print("Running parallel Hamiltonian leapfrog with full trace for visualization")
+run_parallel = jax.jit(sampler.run_parallel_hamiltonian_leapfrog)
 states_par_packed, iters = run_parallel(
     key, initial_state, init_trajectory_guess, params
 )
@@ -139,19 +143,20 @@ if __name__ == "__main__":
         chain_length=chain_length,
         quasi=quasi,
         savepath=plot_progress,
+        suptitle=f"{chain_length} Hamiltonian leapfrog draws (quasi={quasi})",
     )
     hmc_plot.newton_max_error_plot(
         states_par,
         rtol=rtol,
         savepath=plot_newton,
-        title=f"DEER Newton error ({target.name}, microcanonical)",
+        title=f"DEER Newton error ({target.name}, Hamiltonian leapfrog)",
     )
     hmc_plot.newton_truth_error_plot(
         states_par,
         states_seq,
         dim=D,
         savepath=plot_newton_truth,
-        title=f"Parallel-vs-sequential trajectory error ({target.name}, microcanonical)",
+        title=f"Parallel-vs-sequential trajectory error ({target.name}, Hamiltonian leapfrog)",
     )
 
     states_par_np = np.asarray(jax.device_get(states_par))
