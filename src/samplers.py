@@ -138,6 +138,15 @@ def _sqrt_nonneg_jvp(primals, tangents):
 
 _MASS_LOWER: float = 1e-20
 _MASS_UPPER: float = 1e20
+_DEFAULT_MASS_REG_STEPS: int = 10
+
+
+def _identity_mass_blend(
+    count: jnp.ndarray, mass_reg_steps: int | float
+) -> jnp.ndarray:
+    """Blend weight on identity mass in ``[0, 1]``; 1 at count=0, 0 after ``mass_reg_steps``."""
+    steps = jnp.asarray(mass_reg_steps, dtype=count.dtype)
+    return jnp.clip(1.0 - count / jnp.maximum(steps, 1.0), 0.0, 1.0)
 
 
 def _adaptive_mass_diag(
@@ -146,11 +155,18 @@ def _adaptive_mass_diag(
     grad_var: jnp.ndarray | None = None,
     fill_invalid: float = 1.0,
     clamp: tuple[float, float] = (_MASS_LOWER, _MASS_UPPER),
+    *,
+    count: jnp.ndarray | None = None,
+    mass_reg_steps: int | float | None = None,
 ) -> jnp.ndarray:
     """Diagonal mass from Welford variances.
 
     draw-only: mass = draw_var
     grad:      mass = sqrt(draw_var / grad_var)
+
+    When ``count`` and ``mass_reg_steps`` are set, the result is blended toward
+    ``fill_invalid`` (identity mass) early in the chain, with the blend tapering
+    linearly to zero over ``mass_reg_steps`` Welford updates.
 
     Non-finite or zero entries are replaced with fill_invalid (default 1.0),
     then the result is clamped to [clamp[0], clamp[1]].
@@ -161,11 +177,15 @@ def _adaptive_mass_diag(
         if grad_var is None:
             raise ValueError("grad_var is required when mode is 'grad'")
         val = _sqrt_nonneg(draw_var / grad_var)
-    return jnp.where(
+    mass = jnp.where(
         jnp.isfinite(val) & (val > 0.0),
         jnp.clip(val, clamp[0], clamp[1]),
         fill_invalid,
     )
+    if count is not None and mass_reg_steps is not None:
+        blend = _identity_mass_blend(count, mass_reg_steps)
+        mass = blend * fill_invalid + (1.0 - blend) * mass
+    return mass
 
 
 def _sample_momentum_diag_mass(mass_diag: jnp.ndarray, key, shape):
@@ -421,13 +441,25 @@ class ParallelHMC:
         # already applied, which (because adaptation is gated purely by t < mass_adapt_steps)
         # equals the incoming count min(t, mass_adapt_steps).
         count = jnp.minimum(t, mass_adapt_steps).astype(position.dtype)
+        mass_reg_steps = params.get("mass_reg_steps", _DEFAULT_MASS_REG_STEPS)
 
         draw_var = _variance_diag_from_welford(count, m2_draw)
         if mode == "draw-only":
-            mass_diag = _adaptive_mass_diag("draw-only", draw_var)
+            mass_diag = _adaptive_mass_diag(
+                "draw-only",
+                draw_var,
+                count=count,
+                mass_reg_steps=mass_reg_steps,
+            )
         else:
             grad_var = _variance_diag_from_welford(count, m2_grad)
-            mass_diag = _adaptive_mass_diag("grad", draw_var, grad_var=grad_var)
+            mass_diag = _adaptive_mass_diag(
+                "grad",
+                draw_var,
+                grad_var=grad_var,
+                count=count,
+                mass_reg_steps=mass_reg_steps,
+            )
 
         momentum_seed, mh_seed = jr.split(seed)
         momentum = _sample_momentum_diag_mass(mass_diag, momentum_seed, (D,))
@@ -653,12 +685,25 @@ class ParallelMALA(ParallelHMC):
             position, mean_draw, m2_draw, mean_grad, m2_grad = unpacked
 
         count = jnp.minimum(t, mass_adapt_steps).astype(position.dtype)
+        mass_reg_steps = params.get("mass_reg_steps", _DEFAULT_MASS_REG_STEPS)
+
         draw_var = _variance_diag_from_welford(count, m2_draw)
         if mode == "draw-only":
-            mass_diag = _adaptive_mass_diag("draw-only", draw_var)
+            mass_diag = _adaptive_mass_diag(
+                "draw-only",
+                draw_var,
+                count=count,
+                mass_reg_steps=mass_reg_steps,
+            )
         else:
             grad_var = _variance_diag_from_welford(count, m2_grad)
-            mass_diag = _adaptive_mass_diag("grad", draw_var, grad_var=grad_var)
+            mass_diag = _adaptive_mass_diag(
+                "grad",
+                draw_var,
+                grad_var=grad_var,
+                count=count,
+                mass_reg_steps=mass_reg_steps,
+            )
 
         new_position, grad_new = self._mala_propose_accept(
             position, mass_diag, seed, step_size

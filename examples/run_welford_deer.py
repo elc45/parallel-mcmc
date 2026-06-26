@@ -212,7 +212,7 @@ def make_plots(results, sweep, sweep_q, args):
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    out_dir = _EXAMPLES_DIR / "welford_runs"
+    out_dir = _REPO_ROOT / "experiments" / "welford_runs"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     fig, axes = plt.subplots(1, 3, figsize=(16, 4.5))

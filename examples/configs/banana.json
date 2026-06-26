@@ -3,7 +3,7 @@
   "target_params": {
     "curvature": 0.05
   },
-  "chain_length": 500,
+  "chain_length": 5000,
   "random_seed": 123,
   "initial_state_scale": 1.0,
   "damp_factor": 1.0,
@@ -13,7 +13,8 @@
   "quasi": true,
   "qmem_efficient": false,
   "clip_val": 1e8,
-  "epsilon": 0.5,
+  "epsilon": 1.0,
   "num_leapfrog_steps": 8,
-  "mass_adapt_steps": 100
+  "mass_adapt_steps": 1000,
+  "mass_reg_steps": 10
 }

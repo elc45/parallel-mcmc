@@ -21,12 +21,15 @@ import jax.random as jr
 import numpy as np
 from src import samplers
 from src.util import (
+    lyapunov_exponent_sequential,
     mass_diag_trajectory,
+    save_lyapunov_results,
     unpack_adaptive_state_trajectory,
     welford_count_trajectory,
 )
 
 _EXAMPLES_DIR = Path(__file__).resolve().parent
+_REPO_ROOT = _EXAMPLES_DIR.parent
 if str(_EXAMPLES_DIR) not in sys.path:
     sys.path.insert(0, str(_EXAMPLES_DIR))
 
@@ -37,7 +40,7 @@ jax.config.update("jax_enable_x64", True)
 jax.config.update("jax_default_matmul_precision", "highest")
 
 DEFAULT_CONFIG_PATH = _EXAMPLES_DIR / "configs" / "mala_gaussian_2d.json"
-RUNS_PARENT = _EXAMPLES_DIR / "mala_runs"
+RUNS_PARENT = _REPO_ROOT / "experiments" / "mala_runs"
 
 _SHOW_DEER_PROGRESS = __name__ == "__main__"
 
@@ -89,6 +92,7 @@ max_iter = chain_length
 params = {
     "epsilon": float(cfg.get("epsilon", 0.5)),
     "mass_adapt_steps": int(cfg.get("mass_adapt_steps", 100)),
+    "mass_reg_steps": int(cfg.get("mass_reg_steps", 10)),
 }
 
 sampler = samplers.ParallelMALA(
@@ -192,9 +196,14 @@ if __name__ == "__main__":
 
     adaptive_mass_mode = samplers._normalize_adaptive_mass(adaptive_mass)
     mass_adapt_steps = params["mass_adapt_steps"]
+    mass_reg_steps = params["mass_reg_steps"]
     if adaptive_mass_mode is not None:
-        mass_par = mass_diag_trajectory(states_par_np, D, adaptive_mass_mode, mass_adapt_steps)
-        mass_seq = mass_diag_trajectory(states_seq_full_np, D, adaptive_mass_mode, mass_adapt_steps)
+        mass_par = mass_diag_trajectory(
+            states_par_np, D, adaptive_mass_mode, mass_adapt_steps, mass_reg_steps=mass_reg_steps
+        )
+        mass_seq = mass_diag_trajectory(
+            states_seq_full_np, D, adaptive_mass_mode, mass_adapt_steps, mass_reg_steps=mass_reg_steps
+        )
         np.save(run_dir / "mass_matrix_seq.npy", mass_seq)
         hmc_plot.newton_mass_truth_error_plot(
             mass_par,
@@ -228,6 +237,35 @@ if __name__ == "__main__":
             states_par_np,
             run_dir / "trace.gif",
             max_newton_iter=int(iters),
+        )
+
+    if cfg.get("compute_lyapunov", True):
+        lyap_tangent_key = jr.PRNGKey(int(cfg.get("lyapunov_seed", cfg["random_seed"] + 1)))
+        tangent_subspace = cfg.get("lyapunov_tangent", "full")
+        y0_lyap = (
+            sampler._initial_packed_state(initial_state)
+            if adaptive_mass_mode is not None
+            else initial_state
+        )
+        lyap = lyapunov_exponent_sequential(
+            lambda s, d: sampler.mala_fn_for_deer(s, d, params),
+            y0_lyap,
+            key,
+            chain_length,
+            lyap_tangent_key,
+            tangent_subspace=tangent_subspace,
+            position_dim=D if tangent_subspace == "position" else None,
+        )
+        save_lyapunov_results(run_dir, lyap)
+        hmc_plot.lyapunov_ftle_plot(
+            lyap["ftle"],
+            run_dir / "lyapunov_ftle.png",
+            lyapunov_exponent=lyap["lyapunov_exponent"],
+            title=f"FTLE, sequential MALA ({target.name}, tangent={tangent_subspace})",
+        )
+        print(
+            f"Lyapunov exponent: {lyap['lyapunov_exponent']:.4f} "
+            f"(tail: {lyap['lyapunov_exponent_tail']:.4f}, tangent={tangent_subspace})"
         )
 
     print(f"Saved config, plots, states_par.npy, states_seq.npy, and GIFs under {run_dir}")

@@ -472,3 +472,27 @@ def position_convergence_gif(
         plt.close(fig)
 
     imageio.mimsave(savepath, gif_frames, duration=duration, loop=0)
+
+
+def lyapunov_ftle_plot(
+    ftle: np.ndarray,
+    savepath: Path | str,
+    *,
+    lyapunov_exponent: float | None = None,
+    title: str = "Finite-time Lyapunov exponent",
+) -> None:
+    """Plot the running FTLE estimate along the sequential chain."""
+    ftle = np.asarray(ftle)
+    t = np.arange(1, ftle.shape[0] + 1)
+    fig, ax = plt.subplots(figsize=(8, 4))
+    ax.plot(t, ftle, lw=1.5)
+    if lyapunov_exponent is not None:
+        ax.axhline(lyapunov_exponent, color="k", ls="--", alpha=0.6, label=f"final FTLE = {lyapunov_exponent:.4g}")
+        ax.legend()
+    ax.set_xlabel("chain index")
+    ax.set_ylabel("FTLE")
+    ax.set_title(title)
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(savepath, dpi=150, bbox_inches="tight")
+    plt.close(fig)

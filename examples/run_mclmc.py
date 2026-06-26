@@ -11,6 +11,7 @@ import numpy as np
 from src import samplers
 
 _EXAMPLES_DIR = Path(__file__).resolve().parent
+_REPO_ROOT = _EXAMPLES_DIR.parent
 if str(_EXAMPLES_DIR) not in sys.path:
     sys.path.insert(0, str(_EXAMPLES_DIR))
 
@@ -21,7 +22,7 @@ jax.config.update("jax_enable_x64", True)
 jax.config.update("jax_default_matmul_precision", "highest")
 
 DEFAULT_CONFIG_PATH = _EXAMPLES_DIR / "configs" / "gaussian_10d_mclmc.json"
-RUNS_PARENT = _EXAMPLES_DIR / "mclmc_runs"
+RUNS_PARENT = _REPO_ROOT / "experiments" / "mclmc_runs"
 
 _SHOW_DEER_PROGRESS = __name__ == "__main__"
 

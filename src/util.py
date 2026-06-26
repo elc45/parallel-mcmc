@@ -1,7 +1,11 @@
-import numpy as np
-import jax.numpy as jnp
+import json
 from pathlib import Path
-from typing import Literal
+from typing import Callable, Literal
+
+import jax
+import jax.numpy as jnp
+import jax.random as jr
+import numpy as np
 
 
 def _unpack_draw_only_trajectory(packed: jnp.ndarray, D: int):
@@ -99,6 +103,7 @@ def mass_diag_trajectory(
     mass_adapt_steps: int,
     clamp: tuple[float, float] = (_MASS_LOWER, _MASS_UPPER),
     fill_invalid: float = 1.0,
+    mass_reg_steps: int | None = None,
 ) -> np.ndarray:
     """Reconstruct the diagonal mass matrix from packed adaptive states.
 
@@ -118,6 +123,9 @@ def mass_diag_trajectory(
     mass_adapt_steps:
         Number of leading steps over which the mass matrix is adapted; used to reconstruct
         the (no-longer-stored) Welford sample count via :func:`welford_count_trajectory`.
+    mass_reg_steps:
+        If set, blend mass toward ``fill_invalid`` (identity) early in the chain, tapering
+        linearly to zero over this many Welford counts (default: no extra regularization).
     clamp:
         ``(lower, upper)`` clamp applied to valid mass entries.
     fill_invalid:
@@ -141,11 +149,16 @@ def mass_diag_trajectory(
         grad_var = _variance_diag_from_welford_np(count, m2_grad)
         with np.errstate(divide="ignore", invalid="ignore"):
             val = np.sqrt(np.maximum(draw_var / grad_var, 0.0))
-    return np.where(
+    mass = np.where(
         np.isfinite(val) & (val > 0.0),
         np.clip(val, clamp[0], clamp[1]),
         fill_invalid,
     )
+    if mass_reg_steps is not None and mass_reg_steps > 0:
+        blend = np.clip(1.0 - count / float(mass_reg_steps), 0.0, 1.0)
+        blend = np.asarray(blend)[..., None]
+        mass = blend * fill_invalid + (1.0 - blend) * mass
+    return mass
 
 
 def load_states_par(
@@ -185,3 +198,99 @@ def load_states_par(
     if D is None:
         raise ValueError("D must be provided when mode is not None")
     return unpack_adaptive_state_trajectory(arr, D, mode)
+
+
+def lyapunov_exponent_sequential(
+    step_fn: Callable,
+    y0: jnp.ndarray,
+    chain_key: jnp.ndarray,
+    chain_length: int,
+    tangent_key: jnp.ndarray,
+    *,
+    tangent_subspace: Literal["full", "position"] = "full",
+    position_dim: int | None = None,
+) -> dict[str, np.ndarray | float | str]:
+    """Estimate the largest Lyapunov exponent of a sequential chain map via JVP propagation.
+
+    Applies the Benettin renormalization algorithm to the discrete-time map
+    ``y_{t+1} = step_fn(y_t, driver_t)`` using ``jax.jvp`` for the Jacobian-vector
+    product. Returns the per-step log-stretch factors and the finite-time Lyapunov
+    estimate (running mean of log-stretches).
+
+    Parameters
+    ----------
+    step_fn:
+        One chain transition ``(state, driver) -> next_state``. The ``driver`` is
+        ``(prng_key, chain_index)`` as used by the DEER samplers.
+    y0:
+        Initial packed (or position-only) state.
+    chain_key:
+        PRNG key used to generate the driver keys (same as the sequential chain run).
+    chain_length:
+        Number of transitions ``T``.
+    tangent_key:
+        PRNG key for drawing the initial unit tangent direction.
+    tangent_subspace:
+        ``"full"`` perturbs all state components; ``"position"`` restricts the
+        initial tangent to the leading ``position_dim`` coordinates (Welford slots
+        receive zero initial perturbation).
+    position_dim:
+        Required when ``tangent_subspace="position"``.
+
+    Returns
+    -------
+    dict
+        ``log_stretches`` (T,), ``ftle`` (T,), ``lyapunov_exponent`` (scalar,
+        ``ftle[-1]``), ``lyapunov_exponent_tail`` (mean log-stretch over the
+        second half of the chain), and ``tangent_subspace``.
+    """
+    if tangent_subspace == "position" and position_dim is None:
+        raise ValueError("position_dim is required when tangent_subspace='position'")
+
+    v0 = jr.normal(tangent_key, y0.shape, dtype=y0.dtype)
+    if tangent_subspace == "position":
+        v0 = v0.at[position_dim:].set(0.0)
+    v0_norm = jnp.linalg.norm(v0)
+    v0 = jnp.where(v0_norm > 0, v0 / v0_norm, v0)
+
+    drivers = (jr.split(chain_key, (chain_length,)), jnp.arange(chain_length))
+
+    def _scan_step(carry, driver):
+        state, tangent = carry
+
+        def _map_state(s):
+            return step_fn(s, driver)
+
+        state_next = _map_state(state)
+        _, tangent_mapped = jax.jvp(_map_state, (state,), (tangent,))
+        stretch = jnp.linalg.norm(tangent_mapped)
+        log_stretch = jnp.log(jnp.maximum(stretch, 1e-300))
+        tangent_next = tangent_mapped / jnp.maximum(stretch, 1e-300)
+        return (state_next, tangent_next), log_stretch
+
+    _, log_stretches = jax.lax.scan(_scan_step, (y0, v0), drivers)
+    log_stretches_np = np.asarray(log_stretches)
+    t = np.arange(1, chain_length + 1, dtype=float)
+    ftle = np.cumsum(log_stretches_np) / t
+    tail = log_stretches_np[chain_length // 2 :]
+    return {
+        "log_stretches": log_stretches_np,
+        "ftle": ftle,
+        "lyapunov_exponent": float(ftle[-1]),
+        "lyapunov_exponent_tail": float(np.mean(tail)) if tail.size else float(ftle[-1]),
+        "tangent_subspace": tangent_subspace,
+    }
+
+
+def save_lyapunov_results(run_dir: str | Path, lyap: dict) -> None:
+    """Save Lyapunov outputs alongside other run artifacts."""
+    run_dir = Path(run_dir)
+    np.save(run_dir / "lyapunov_log_stretches.npy", np.asarray(lyap["log_stretches"]))
+    np.save(run_dir / "lyapunov_ftle.npy", np.asarray(lyap["ftle"]))
+    summary = {
+        "lyapunov_exponent": float(lyap["lyapunov_exponent"]),
+        "lyapunov_exponent_tail": float(lyap["lyapunov_exponent_tail"]),
+        "tangent_subspace": lyap["tangent_subspace"],
+    }
+    with open(run_dir / "lyapunov.json", "w") as f:
+        json.dump(summary, f, indent=2)

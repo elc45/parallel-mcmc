@@ -2,16 +2,9 @@
 parallel_mcmc.egg-info/
 examples/plots/
 sandbox.ipynb
-examples/hmc_runs/.DS_Store
 *.npy
 !Q.npy
 *.png
-hmc_runs/
 *.DS_Store
 analysis.ipynb
-mclmc_runs/
-mala_runs/
-leapfrog_deer_runs/
-langevin_runs/
-microcanonical_runs/
-examples/hamiltonian_leapfrog_runs/
+experiments/
