@@ -10,6 +10,7 @@ hmc_runs/
 *.DS_Store
 analysis.ipynb
 mclmc_runs/
+mala_runs/
 leapfrog_deer_runs/
 langevin_runs/
 microcanonical_runs/
