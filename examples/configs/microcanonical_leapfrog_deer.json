@@ -1,10 +1,10 @@
 {
-  "target": "gaussian_10d",
+  "target": "banana",
   "target_params": {},
   "chain_length": 5000,
   "random_seed": 123,
   "initial_state_scale": 10.0,
-  "damp_factor": 0.55,
+  "damp_factor": 1.0,
   "tol": 0.001,
   "rtol": 0.001,
   "quasi": true,

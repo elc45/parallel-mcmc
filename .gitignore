@@ -13,3 +13,4 @@ mclmc_runs/
 leapfrog_deer_runs/
 langevin_runs/
 microcanonical_runs/
+examples/hamiltonian_leapfrog_runs/

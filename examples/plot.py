@@ -35,6 +35,33 @@ def _fig_to_rgb_array(fig: plt.Figure) -> np.ndarray:
     return buf.reshape(h_phys, w_phys, 4)[..., :3]
 
 
+def _xy_limits_with_padding(
+    xs: np.ndarray, ys: np.ndarray, *, pad_frac: float = 0.05
+) -> tuple[float, float, float, float]:
+    """Axis limits from reference coordinates with proportional padding."""
+    xs = np.asarray(xs, dtype=float)
+    ys = np.asarray(ys, dtype=float)
+    xs = xs[np.isfinite(xs)]
+    ys = ys[np.isfinite(ys)]
+    if xs.size == 0 or ys.size == 0:
+        return -1.0, 1.0, -1.0, 1.0
+    xpad = max((xs.max() - xs.min()) * pad_frac, 1e-6)
+    ypad = max((ys.max() - ys.min()) * pad_frac, 1e-6)
+    return xs.min() - xpad, xs.max() + xpad, ys.min() - ypad, ys.max() + ypad
+
+
+def _mask_outside_limits(
+    x: np.ndarray, y: np.ndarray, xlim: tuple[float, float], ylim: tuple[float, float]
+) -> tuple[np.ndarray, np.ndarray]:
+    """Replace out-of-limits points with nan so matplotlib does not connect them."""
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    xlo, xhi = xlim
+    ylo, yhi = ylim
+    oob = ~np.isfinite(x) | ~np.isfinite(y) | (x < xlo) | (x > xhi) | (y < ylo) | (y > yhi)
+    return np.where(oob, np.nan, x), np.where(oob, np.nan, y)
+
+
 def newton_max_errors(states_par: jnp.ndarray, rtol: float | None = None) -> jnp.ndarray:
     """Scalar DEER-style error per Newton step (matches ``deer.deer_iteration_helper.scan_func``).
 
@@ -274,15 +301,16 @@ def progress_plot(
     axes_flat = np.ravel(np.asarray(axes))
 
     seq_with_init = jnp.vstack([initial_state[None, :], states_seq])
+    seq_x = np.asarray(seq_with_init[:, ix], dtype=float)
+    seq_y = np.asarray(seq_with_init[:, iy], dtype=float)
+    xlo, xhi, ylo, yhi = _xy_limits_with_padding(seq_x, seq_y)
 
     for ax_idx, itr in enumerate(newton_iterations):
         ax = axes_flat[ax_idx]
 
         par_x = np.asarray(states_par[itr][:, ix], dtype=float)
         par_y = np.asarray(states_par[itr][:, iy], dtype=float)
-        finite_mask = np.isfinite(par_x) & np.isfinite(par_y)
-        par_x = np.where(finite_mask, par_x, np.nan)
-        par_y = np.where(finite_mask, par_y, np.nan)
+        par_x, par_y = _mask_outside_limits(par_x, par_y, (xlo, xhi), (ylo, yhi))
 
         ax.plot(
             par_x,
@@ -293,8 +321,8 @@ def progress_plot(
             label="Parallel",
         )
         ax.plot(
-            seq_with_init[:, ix],
-            seq_with_init[:, iy],
+            seq_x,
+            seq_y,
             color="k",
             alpha=0.75,
             lw=1.2,
@@ -311,17 +339,8 @@ def progress_plot(
             label="Initial state" if ax_idx == 0 else None,
         )
 
-        # Set axis limits from finite values only so matplotlib's tick locator
-        # never sees inf/overflow bounds.
-        finite_xs = np.concatenate([par_x[finite_mask], np.asarray(seq_with_init[:, ix], dtype=float)])
-        finite_ys = np.concatenate([par_y[finite_mask], np.asarray(seq_with_init[:, iy], dtype=float)])
-        finite_xs = finite_xs[np.isfinite(finite_xs)]
-        finite_ys = finite_ys[np.isfinite(finite_ys)]
-        if finite_xs.size and finite_ys.size:
-            xpad = max((finite_xs.max() - finite_xs.min()) * 0.05, 1e-6)
-            ypad = max((finite_ys.max() - finite_ys.min()) * 0.05, 1e-6)
-            ax.set_xlim(finite_xs.min() - xpad, finite_xs.max() + xpad)
-            ax.set_ylim(finite_ys.min() - ypad, finite_ys.max() + ypad)
+        ax.set_xlim(xlo, xhi)
+        ax.set_ylim(ylo, yhi)
 
         ax.set_xlabel(xlabel, fontsize=16)
         ax.set_ylabel(ylabel, fontsize=16)
