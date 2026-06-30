@@ -26,6 +26,7 @@ from src.util import (
     save_lyapunov_results,
     unpack_adaptive_state_trajectory,
     welford_count_trajectory,
+    welford_settings_from_config,
 )
 
 _EXAMPLES_DIR = Path(__file__).resolve().parent
@@ -85,6 +86,7 @@ quasi = bool(cfg["quasi"])
 qmem_efficient = bool(cfg["qmem_efficient"])
 clip_val = float(cfg["clip_val"])
 welford_init = cfg.get("welford_init")
+welford_settings = welford_settings_from_config(cfg)
 
 initial_state = 0.0 + float(cfg["initial_state_scale"]) * jr.normal(skey, (D,))
 max_iter = chain_length
@@ -110,6 +112,7 @@ sampler = samplers.ParallelMALA(
     qmem_efficient=qmem_efficient,
     clip_val=clip_val,
     welford_init=welford_init,
+    **welford_settings,
 )
 
 run_sequential = jax.jit(sampler.run_sequential_mala_full)
@@ -145,6 +148,7 @@ sampler = samplers.ParallelMALA(
     qmem_efficient=qmem_efficient,
     clip_val=clip_val,
     welford_init=welford_init,
+    **welford_settings,
 )
 
 print("Running parallel MALA with full trace for visualization")
@@ -197,12 +201,26 @@ if __name__ == "__main__":
     adaptive_mass_mode = samplers._normalize_adaptive_mass(adaptive_mass)
     mass_adapt_steps = params["mass_adapt_steps"]
     mass_reg_steps = params["mass_reg_steps"]
+    welford_method = sampler.welford_method
+    welford_n_init = sampler.welford_n_init
     if adaptive_mass_mode is not None:
         mass_par = mass_diag_trajectory(
-            states_par_np, D, adaptive_mass_mode, mass_adapt_steps, mass_reg_steps=mass_reg_steps
+            states_par_np,
+            D,
+            adaptive_mass_mode,
+            mass_adapt_steps,
+            mass_reg_steps=mass_reg_steps,
+            welford_method=welford_method,
+            welford_n_init=welford_n_init,
         )
         mass_seq = mass_diag_trajectory(
-            states_seq_full_np, D, adaptive_mass_mode, mass_adapt_steps, mass_reg_steps=mass_reg_steps
+            states_seq_full_np,
+            D,
+            adaptive_mass_mode,
+            mass_adapt_steps,
+            mass_reg_steps=mass_reg_steps,
+            welford_method=welford_method,
+            welford_n_init=welford_n_init,
         )
         np.save(run_dir / "mass_matrix_seq.npy", mass_seq)
         hmc_plot.newton_mass_truth_error_plot(
@@ -226,6 +244,8 @@ if __name__ == "__main__":
             run_dir / "mass_matrix_trace.gif",
             count=count_arr,
             max_newton_iter=int(iters),
+            welford_method=welford_method,
+            welford_n_init=welford_n_init,
         )
         hmc_plot.position_convergence_gif(
             position_arr,

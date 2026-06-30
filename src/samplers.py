@@ -97,6 +97,28 @@ def _pack_adaptive_state(position, mean_draw, m2_draw, mean_grad, m2_grad):
     )
 
 
+def _normalize_welford_method(
+    welford_method: str | None,
+) -> Literal["standard", "discounted"]:
+    """Map config input to ``\"standard\"`` or ``\"discounted\"`` Welford."""
+    if welford_method is None:
+        return "standard"
+    if not isinstance(welford_method, str):
+        raise TypeError(
+            "welford_method must be a string or None, "
+            f"got {type(welford_method).__name__}"
+        )
+    key = welford_method.strip().lower()
+    if key in ("standard", "classic", ""):
+        return "standard"
+    if key in ("discounted", "discount"):
+        return "discounted"
+    raise ValueError(
+        "welford_method must be 'standard' or 'discounted' "
+        f"(got {welford_method!r})"
+    )
+
+
 def _welford_update_diag(
     count: jnp.ndarray,
     mean: jnp.ndarray,
@@ -111,6 +133,39 @@ def _welford_update_diag(
     return n_new, mean_new, m2_new
 
 
+def _discounted_welford_weight(
+    n_init: jnp.ndarray | float,
+    n: jnp.ndarray,
+) -> jnp.ndarray:
+    """Effective weight ``w`` after ``n`` discounted Welford updates."""
+    dtype = jnp.result_type(n_init, n, jnp.float32)
+    w = jnp.asarray(n_init, dtype=dtype)
+    n_int = jnp.asarray(n, dtype=jnp.int32)
+
+    def body(k: int, w_carry: jnp.ndarray) -> jnp.ndarray:
+        alpha = 1.0 - 1.0 / (jnp.asarray(n_init, dtype=dtype) + k + 1.0)
+        return alpha * w_carry + 1.0
+
+    return jax.lax.fori_loop(0, n_int, body, w)
+
+
+def _discounted_welford_update_diag(
+    n_init: jnp.ndarray | float,
+    count: jnp.ndarray,
+    mean: jnp.ndarray,
+    s_diag: jnp.ndarray,
+    x: jnp.ndarray,
+):
+    """One discounted-Welford update; ``s_diag`` stores the weighted M2 accumulator ``s``."""
+    n = count + 1.0
+    alpha = 1.0 - 1.0 / (jnp.asarray(n_init, dtype=n.dtype) + n)
+    w = _discounted_welford_weight(n_init, count)
+    w_new = alpha * w + 1.0
+    mean_new = mean + (x - mean) / w_new
+    s_new = alpha * s_diag + (x - mean) * (x - mean_new)
+    return count + 1.0, mean_new, s_new
+
+
 def _variance_diag_from_welford(count: jnp.ndarray, m2_diag: jnp.ndarray) -> jnp.ndarray:
     """Unbiased sample variance per coord when count > 1; else zero."""
     return jnp.where(
@@ -118,6 +173,42 @@ def _variance_diag_from_welford(count: jnp.ndarray, m2_diag: jnp.ndarray) -> jnp
         m2_diag / jnp.maximum(count - 1.0, 1.0),
         jnp.zeros_like(m2_diag),
     )
+
+
+def _variance_diag_from_discounted_welford(
+    n_init: jnp.ndarray | float,
+    count: jnp.ndarray,
+    s_diag: jnp.ndarray,
+) -> jnp.ndarray:
+    """Discounted-Welford variance estimate ``s / w`` per coordinate."""
+    w = _discounted_welford_weight(n_init, count)
+    return jnp.where(w > 0.0, s_diag / w, jnp.zeros_like(s_diag))
+
+
+def _variance_diag_from_accumulator(
+    method: Literal["standard", "discounted"],
+    count: jnp.ndarray,
+    m2_diag: jnp.ndarray,
+    *,
+    n_init: jnp.ndarray | float = 0.0,
+) -> jnp.ndarray:
+    if method == "discounted":
+        return _variance_diag_from_discounted_welford(n_init, count, m2_diag)
+    return _variance_diag_from_welford(count, m2_diag)
+
+
+def _welford_update_accumulator(
+    method: Literal["standard", "discounted"],
+    count: jnp.ndarray,
+    mean: jnp.ndarray,
+    m2_diag: jnp.ndarray,
+    x: jnp.ndarray,
+    *,
+    n_init: jnp.ndarray | float = 0.0,
+):
+    if method == "discounted":
+        return _discounted_welford_update_diag(n_init, count, mean, m2_diag, x)
+    return _welford_update_diag(count, mean, m2_diag, x)
 
 
 @jax.custom_jvp
@@ -214,6 +305,8 @@ class ParallelHMC:
     rtol: float | None
     adaptive_mass: Literal["grad", "draw-only"] | None
     welford_init: dict
+    welford_method: Literal["standard", "discounted"]
+    welford_n_init: float
     chain_state_dim: int
     target_log_prob_and_grad: Callable
 
@@ -233,7 +326,9 @@ class ParallelHMC:
                 tol: float | None = None, 
                 rtol: float | None = None,
                 adaptive_mass: str | bool | None = None,
-                welford_init: dict | None = None):
+                welford_init: dict | None = None,
+                welford_method: str | None = None,
+                welford_n_init: float | None = None):
         '''
         Args:
             log_prob           - unnormalized log-posterior callable; must accept only the position
@@ -279,6 +374,13 @@ class ParallelHMC:
                                  strings ``\"zeros\"``, ``\"ones\"``, ``\"ramp\"`` (``1..T``), or
                                  ``\"positions\"`` (the trajectory guess itself; means only). Missing
                                  keys / ``None`` preserve the defaults: all means/M2 = ``zeros``.
+                                 Optional ``\"n_init\"`` sets the discounted-Welford offset when
+                                 ``welford_method`` is ``\"discounted\"`` (overridden by
+                                 constructor ``welford_n_init``).
+            welford_method     - ``\"standard\"`` (default) or ``\"discounted\"`` online variance
+                                 accumulator for adaptive mass.
+            welford_n_init     - discount offset ``n^\\text{init}`` for discounted Welford
+                                 (default ``0``; may also be set via ``welford_init[\"n_init\"]``).
         '''
         self.log_prob = log_prob
         self.D = dim
@@ -297,6 +399,11 @@ class ParallelHMC:
         self.rtol = rtol
         self.adaptive_mass = _normalize_adaptive_mass(adaptive_mass)
         self.welford_init = dict(welford_init) if welford_init else {}
+        self.welford_method = _normalize_welford_method(welford_method)
+        init_n = self.welford_init.get("n_init", 0.0)
+        self.welford_n_init = float(
+            welford_n_init if welford_n_init is not None else init_n
+        )
         self.chain_state_dim = (
             _packed_state_dim(dim, self.adaptive_mass)
             if self.adaptive_mass is not None
@@ -442,8 +549,12 @@ class ParallelHMC:
         # equals the incoming count min(t, mass_adapt_steps).
         count = jnp.minimum(t, mass_adapt_steps).astype(position.dtype)
         mass_reg_steps = params.get("mass_reg_steps", _DEFAULT_MASS_REG_STEPS)
+        welford_method = self.welford_method
+        welford_n_init = jnp.asarray(self.welford_n_init, dtype=position.dtype)
 
-        draw_var = _variance_diag_from_welford(count, m2_draw)
+        draw_var = _variance_diag_from_accumulator(
+            welford_method, count, m2_draw, n_init=welford_n_init
+        )
         if mode == "draw-only":
             mass_diag = _adaptive_mass_diag(
                 "draw-only",
@@ -452,7 +563,9 @@ class ParallelHMC:
                 mass_reg_steps=mass_reg_steps,
             )
         else:
-            grad_var = _variance_diag_from_welford(count, m2_grad)
+            grad_var = _variance_diag_from_accumulator(
+                welford_method, count, m2_grad, n_init=welford_n_init
+            )
             mass_diag = _adaptive_mass_diag(
                 "grad",
                 draw_var,
@@ -490,7 +603,14 @@ class ParallelHMC:
         if mode == "draw-only":
             _, mean_n, m2_n = jax.lax.cond(
                 do_adapt,
-                lambda _: _welford_update_diag(count, mean_draw, m2_draw, new_position),
+                lambda _: _welford_update_accumulator(
+                    welford_method,
+                    count,
+                    mean_draw,
+                    m2_draw,
+                    new_position,
+                    n_init=welford_n_init,
+                ),
                 lambda _: (count, mean_draw, m2_draw),
                 operand=None,
             )
@@ -499,13 +619,27 @@ class ParallelHMC:
         grad_chain = g * new_tlp_grad + (1.0 - g) * tlp_grad
         _, mean_draw_n, m2_draw_n = jax.lax.cond(
             do_adapt,
-            lambda _: _welford_update_diag(count, mean_draw, m2_draw, new_position),
+            lambda _: _welford_update_accumulator(
+                welford_method,
+                count,
+                mean_draw,
+                m2_draw,
+                new_position,
+                n_init=welford_n_init,
+            ),
             lambda _: (count, mean_draw, m2_draw),
             operand=None,
         )
         _, mean_grad_n, m2_grad_n = jax.lax.cond(
             do_adapt,
-            lambda _: _welford_update_diag(count, mean_grad, m2_grad, grad_chain),
+            lambda _: _welford_update_accumulator(
+                welford_method,
+                count,
+                mean_grad,
+                m2_grad,
+                grad_chain,
+                n_init=welford_n_init,
+            ),
             lambda _: (count, mean_grad, m2_grad),
             operand=None,
         )
@@ -686,8 +820,12 @@ class ParallelMALA(ParallelHMC):
 
         count = jnp.minimum(t, mass_adapt_steps).astype(position.dtype)
         mass_reg_steps = params.get("mass_reg_steps", _DEFAULT_MASS_REG_STEPS)
+        welford_method = self.welford_method
+        welford_n_init = jnp.asarray(self.welford_n_init, dtype=position.dtype)
 
-        draw_var = _variance_diag_from_welford(count, m2_draw)
+        draw_var = _variance_diag_from_accumulator(
+            welford_method, count, m2_draw, n_init=welford_n_init
+        )
         if mode == "draw-only":
             mass_diag = _adaptive_mass_diag(
                 "draw-only",
@@ -696,7 +834,9 @@ class ParallelMALA(ParallelHMC):
                 mass_reg_steps=mass_reg_steps,
             )
         else:
-            grad_var = _variance_diag_from_welford(count, m2_grad)
+            grad_var = _variance_diag_from_accumulator(
+                welford_method, count, m2_grad, n_init=welford_n_init
+            )
             mass_diag = _adaptive_mass_diag(
                 "grad",
                 draw_var,
@@ -713,7 +853,14 @@ class ParallelMALA(ParallelHMC):
         if mode == "draw-only":
             _, mean_n, m2_n = jax.lax.cond(
                 do_adapt,
-                lambda _: _welford_update_diag(count, mean_draw, m2_draw, new_position),
+                lambda _: _welford_update_accumulator(
+                    welford_method,
+                    count,
+                    mean_draw,
+                    m2_draw,
+                    new_position,
+                    n_init=welford_n_init,
+                ),
                 lambda _: (count, mean_draw, m2_draw),
                 operand=None,
             )
@@ -721,13 +868,27 @@ class ParallelMALA(ParallelHMC):
 
         _, mean_draw_n, m2_draw_n = jax.lax.cond(
             do_adapt,
-            lambda _: _welford_update_diag(count, mean_draw, m2_draw, new_position),
+            lambda _: _welford_update_accumulator(
+                welford_method,
+                count,
+                mean_draw,
+                m2_draw,
+                new_position,
+                n_init=welford_n_init,
+            ),
             lambda _: (count, mean_draw, m2_draw),
             operand=None,
         )
         _, mean_grad_n, m2_grad_n = jax.lax.cond(
             do_adapt,
-            lambda _: _welford_update_diag(count, mean_grad, m2_grad, grad_new),
+            lambda _: _welford_update_accumulator(
+                welford_method,
+                count,
+                mean_grad,
+                m2_grad,
+                grad_new,
+                n_init=welford_n_init,
+            ),
             lambda _: (count, mean_grad, m2_grad),
             operand=None,
         )
@@ -1303,6 +1464,133 @@ class ParallelLangevin:
 
         out_states, iters = deer.seq1d(
             func=self.langevin_fn_for_deer,
+            y0=y0,
+            xinp=drivers,
+            params=deer_params,
+            init_trajectory_guess=init_trajectory_guess,
+            max_iter=self.max_iter,
+            quasi=self.quasi,
+            qmem_efficient=self.qmem_efficient,
+            clip_val=self.clip_val,
+            full_trace=self.full_trace,
+            damp_factor=self.damp_factor,
+            show_progress=self.show_progress,
+            tol=self.tol,
+            rtol=self.rtol,
+        )
+        return out_states, iters
+
+
+def _patch_jnp_clip_max_keyword() -> None:
+    """BlackJAX 1.2.x uses ``jnp.clip(..., max=)``; JAX 0.4.x expects ``a_max=``."""
+    if getattr(jnp.clip, "_deer_supports_max_kw", False):
+        return
+    _orig_clip = jnp.clip
+
+    def _clip(a, a_min=None, a_max=None, out=None, *, min=None, max=None):
+        if min is not None:
+            a_min = min
+        if max is not None:
+            a_max = max
+        return _orig_clip(a, a_min=a_min, a_max=a_max, out=out)
+
+    _clip._deer_supports_max_kw = True
+    jnp.clip = _clip
+
+
+class ParallelNUTS:
+    """Parallel DEER with BlackJAX No-U-Turn Sampler (NUTS) transitions.
+
+    Each chain step runs one NUTS kernel call (multinomial trajectory sampling with
+    Euclidean Gaussian kinetic energy). The DEER state is the position vector only;
+    momentum is resampled inside each NUTS step, matching BlackJAX's ``nuts.step``.
+    """
+
+    def __init__(
+        self,
+        log_prob: Callable,
+        dim: int,
+        chain_length: int,
+        max_iter: int,
+        alg: str = "quasi",
+        quasi: bool = True,
+        qmem_efficient: bool = False,
+        clip_val: float = 1.0,
+        damp_factor: float = 1.0,
+        full_trace: bool = False,
+        show_progress: bool = False,
+        tol: float | None = None,
+        rtol: float | None = None,
+        inverse_mass_matrix=1.0,
+        max_num_doublings: int = 10,
+        divergence_threshold: float = 1000.0,
+    ):
+        _patch_jnp_clip_max_keyword()
+        from blackjax.mcmc import nuts as blackjax_nuts
+
+        self.log_prob = log_prob
+        self.D = dim
+        self.chain_length = chain_length
+        self.max_iter = max_iter
+        self.alg = alg
+        self.quasi = quasi
+        self.qmem_efficient = qmem_efficient
+        self.clip_val = clip_val
+        self.damp_factor = damp_factor
+        self.full_trace = full_trace
+        self.show_progress = show_progress
+        self.tol = tol
+        self.rtol = rtol
+        self.max_num_doublings = int(max_num_doublings)
+        self.divergence_threshold = float(divergence_threshold)
+        self.inverse_mass_matrix = (
+            inverse_mass_matrix
+            if jnp.ndim(inverse_mass_matrix) > 0
+            else jnp.ones(dim, dtype=jnp.float64)
+        )
+        self.chain_state_dim = dim
+        self._nuts_init = blackjax_nuts.init
+        self._nuts_kernel = blackjax_nuts.build_kernel(
+            divergence_threshold=self.divergence_threshold
+        )
+
+    def nuts_fn_for_deer(self, position: jnp.ndarray, driver, params):
+        """One NUTS transition: position -> next position."""
+        key, _t = driver
+        step_size = params["step_size"]
+        state = self._nuts_init(position, self.log_prob)
+        new_state, _info = self._nuts_kernel(
+            key,
+            state,
+            self.log_prob,
+            step_size,
+            self.inverse_mass_matrix,
+            self.max_num_doublings,
+        )
+        return new_state.position
+
+    def _run_sequential_packed(self, key, initial_state, params):
+        def _fn_for_scan(state, driver):
+            nxt = self.nuts_fn_for_deer(state, driver, params)
+            return nxt, nxt
+
+        drivers = (jr.split(key, (self.chain_length,)), jnp.arange(self.chain_length))
+        _, out_states = jax.lax.scan(_fn_for_scan, initial_state, drivers)
+        return out_states
+
+    def run_sequential_nuts(self, key, initial_state, params):
+        return self._run_sequential_packed(key, initial_state, params)
+
+    def run_parallel_nuts(self, key, initial_state, init_trajectory_guess, params):
+        deer_params = params
+        if self.quasi and self.qmem_efficient and "key" not in params:
+            key, qmem_key = jr.split(key)
+            deer_params = {**params, "key": qmem_key}
+        drivers = (jr.split(key, (self.chain_length,)), jnp.arange(self.chain_length))
+        y0 = initial_state
+
+        out_states, iters = deer.seq1d(
+            func=self.nuts_fn_for_deer,
             y0=y0,
             xinp=drivers,
             params=deer_params,

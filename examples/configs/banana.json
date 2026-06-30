@@ -10,6 +10,8 @@
   "tol": 0.001,
   "rtol": 0.001,
   "adaptive_mass": "draw-only",
+  "welford_method": "discounted",
+  "welford_n_init": 5,
   "quasi": true,
   "qmem_efficient": false,
   "clip_val": 1e8,

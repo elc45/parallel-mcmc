@@ -10,12 +10,22 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 
-def _welford_variance(count: float, m2_diag: np.ndarray) -> np.ndarray:
-    """Unbiased sample variance per coordinate; zero when count <= 1."""
-    m2_diag = np.asarray(m2_diag)
-    if count > 1:
-        return m2_diag / (count - 1)
-    return np.zeros_like(m2_diag)
+def _welford_variance(
+    count: float,
+    m2_diag: np.ndarray,
+    *,
+    welford_method: str = "standard",
+    welford_n_init: float = 0.0,
+) -> np.ndarray:
+    """Online variance per coordinate from Welford accumulators."""
+    from src.util import _variance_diag_from_accumulator_np
+
+    return _variance_diag_from_accumulator_np(
+        welford_method,  # type: ignore[arg-type]
+        np.asarray(count),
+        m2_diag,
+        n_init=welford_n_init,
+    )
 
 
 def _fig_to_rgb_array(fig: plt.Figure) -> np.ndarray:
@@ -368,6 +378,8 @@ def mass_matrix_convergence_gif(
     max_newton_iter: int | None = None,
     step: int = 5,
     duration: float = 0.005,
+    welford_method: str = "standard",
+    welford_n_init: float = 0.0,
 ) -> None:
     """Animated GIF of mass-matrix diagonal variance converging across Newton iterations.
 
@@ -406,7 +418,15 @@ def mass_matrix_convergence_gif(
         m2s = m2_draw[newt_iter]  # (chain_length, D)
         counts = np.asarray(count[newt_iter]).reshape(-1)
         variance_diag = np.stack(
-            [_welford_variance(c, m2s[i]) for i, c in enumerate(counts)]
+            [
+                _welford_variance(
+                    c,
+                    m2s[i],
+                    welford_method=welford_method,
+                    welford_n_init=welford_n_init,
+                )
+                for i, c in enumerate(counts)
+            ]
         )
 
         fig, ax = plt.subplots()

@@ -32,7 +32,7 @@ if str(_EXAMPLES_DIR) not in sys.path:
 
 from src import samplers
 from src.samplers import _pack_draw_only, _unpack_draw_only
-from src.util import mass_diag_trajectory
+from src.util import mass_diag_trajectory, welford_settings_from_config
 from targets import load_target
 
 jax.config.update("jax_enable_x64", True)
@@ -277,11 +277,25 @@ def _run_one_case(
     traj_pert = np.asarray(run(packed_pert, key))
     pos_ref = _positions(traj_ref, D)
     pos_pert = _positions(traj_pert, D)
+    welford_method = sampler.welford_method
+    welford_n_init = sampler.welford_n_init
     mass_ref = mass_diag_trajectory(
-        traj_ref, D, mode, params["mass_adapt_steps"], mass_reg_steps=params["mass_reg_steps"]
+        traj_ref,
+        D,
+        mode,
+        params["mass_adapt_steps"],
+        mass_reg_steps=params["mass_reg_steps"],
+        welford_method=welford_method,
+        welford_n_init=welford_n_init,
     )
     mass_pert = mass_diag_trajectory(
-        traj_pert, D, mode, params["mass_adapt_steps"], mass_reg_steps=params["mass_reg_steps"]
+        traj_pert,
+        D,
+        mode,
+        params["mass_adapt_steps"],
+        mass_reg_steps=params["mass_reg_steps"],
+        welford_method=welford_method,
+        welford_n_init=welford_n_init,
     )
     return {
         "packed_pert": np.asarray(packed_pert),
@@ -337,6 +351,7 @@ def main() -> None:
         chain_length,
         adaptive_mass=adaptive_mass,
         welford_init=cfg.get("welford_init"),
+        **welford_settings_from_config(cfg),
     )
 
     packed_ref = sampler._initial_packed_state(initial_position)

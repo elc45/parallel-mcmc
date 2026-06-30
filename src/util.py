@@ -58,6 +58,19 @@ def unpack_adaptive_state_trajectory(
     return _unpack_grad_adaptive_state_trajectory(packed, D)
 
 
+def welford_settings_from_config(cfg: dict) -> dict:
+    """Extract Welford constructor kwargs from a run config."""
+    welford_init = cfg.get("welford_init")
+    settings = {
+        "welford_method": cfg.get("welford_method", "standard"),
+    }
+    if cfg.get("welford_n_init") is not None:
+        settings["welford_n_init"] = float(cfg["welford_n_init"])
+    elif isinstance(welford_init, dict) and welford_init.get("n_init") is not None:
+        settings["welford_n_init"] = float(welford_init["n_init"])
+    return settings
+
+
 def welford_count_trajectory(chain_length: int, mass_adapt_steps: int) -> np.ndarray:
     """Reconstruct the stored (post-update) Welford counts along a chain.
 
@@ -96,6 +109,57 @@ def _variance_diag_from_welford_np(count: np.ndarray, m2_diag: np.ndarray) -> np
     return np.where(count > 1.0, m2_diag / np.maximum(count - 1.0, 1.0), 0.0)
 
 
+def _discounted_welford_weight_scalar(n_init: float, n: int) -> float:
+    w = float(n_init)
+    for k in range(n):
+        alpha = 1.0 - 1.0 / (n_init + k + 1.0)
+        w = alpha * w + 1.0
+    return w
+
+
+def discounted_welford_weight_trajectory(
+    count: np.ndarray,
+    n_init: float = 0.0,
+) -> np.ndarray:
+    """Effective discounted-Welford weights ``w`` for each entry in ``count``."""
+    count_arr = np.asarray(count, dtype=float)
+    flat = np.atleast_1d(count_arr).ravel()
+    w_flat = np.array(
+        [_discounted_welford_weight_scalar(n_init, int(n)) for n in flat],
+        dtype=float,
+    )
+    return w_flat.reshape(count_arr.shape) if count_arr.shape else w_flat[0]
+
+
+def _variance_diag_from_discounted_welford_np(
+    count: np.ndarray,
+    s_diag: np.ndarray,
+    *,
+    n_init: float = 0.0,
+) -> np.ndarray:
+    """NumPy mirror of ``samplers._variance_diag_from_discounted_welford``."""
+    count = np.asarray(count)
+    s_diag = np.asarray(s_diag)
+    w = np.asarray(discounted_welford_weight_trajectory(count, n_init=n_init))
+    if w.ndim == 0:
+        return np.where(w > 0.0, s_diag / w, np.zeros_like(s_diag))
+    return np.where(w[..., None] > 0.0, s_diag / w[..., None], 0.0)
+
+
+def _variance_diag_from_accumulator_np(
+    method: Literal["standard", "discounted"],
+    count: np.ndarray,
+    m2_diag: np.ndarray,
+    *,
+    n_init: float = 0.0,
+) -> np.ndarray:
+    if method == "discounted":
+        return _variance_diag_from_discounted_welford_np(
+            count, m2_diag, n_init=n_init
+        )
+    return _variance_diag_from_welford_np(count, m2_diag)
+
+
 def mass_diag_trajectory(
     packed: np.ndarray,
     D: int,
@@ -104,6 +168,9 @@ def mass_diag_trajectory(
     clamp: tuple[float, float] = (_MASS_LOWER, _MASS_UPPER),
     fill_invalid: float = 1.0,
     mass_reg_steps: int | None = None,
+    *,
+    welford_method: Literal["standard", "discounted"] = "standard",
+    welford_n_init: float = 0.0,
 ) -> np.ndarray:
     """Reconstruct the diagonal mass matrix from packed adaptive states.
 
@@ -126,6 +193,10 @@ def mass_diag_trajectory(
     mass_reg_steps:
         If set, blend mass toward ``fill_invalid`` (identity) early in the chain, tapering
         linearly to zero over this many Welford counts (default: no extra regularization).
+    welford_method:
+        ``\"standard\"`` (default) or ``\"discounted\"`` variance accumulator.
+    welford_n_init:
+        Discount offset ``n^\\text{init}`` for discounted Welford (default ``0``).
     clamp:
         ``(lower, upper)`` clamp applied to valid mass entries.
     fill_invalid:
@@ -142,11 +213,17 @@ def mass_diag_trajectory(
     unpacked = unpack_adaptive_state_trajectory(packed, D, mode)
     if mode == "draw-only":
         _position, _mean, m2_draw = unpacked
-        val = _variance_diag_from_welford_np(count, m2_draw)
+        val = _variance_diag_from_accumulator_np(
+            welford_method, count, m2_draw, n_init=welford_n_init
+        )
     else:
         _position, _mean_draw, m2_draw, _mean_grad, m2_grad = unpacked
-        draw_var = _variance_diag_from_welford_np(count, m2_draw)
-        grad_var = _variance_diag_from_welford_np(count, m2_grad)
+        draw_var = _variance_diag_from_accumulator_np(
+            welford_method, count, m2_draw, n_init=welford_n_init
+        )
+        grad_var = _variance_diag_from_accumulator_np(
+            welford_method, count, m2_grad, n_init=welford_n_init
+        )
         with np.errstate(divide="ignore", invalid="ignore"):
             val = np.sqrt(np.maximum(draw_var / grad_var, 0.0))
     mass = np.where(
