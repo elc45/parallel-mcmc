@@ -1,6 +1,9 @@
 ## Usage
 Activate environment, then run:
-`python examples/run_hmc.py --config examples/configs/banana.json`
+```bash
+python examples/run_hmc.py --target banana
+python examples/run_hmc.py --target ill_conditioned_gaussian --deer-config examples/configs/deer/default.json
+```
 
 ## Repository Structure 
 The structure of the primary source code and examples is:

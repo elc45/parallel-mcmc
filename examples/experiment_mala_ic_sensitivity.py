@@ -14,8 +14,6 @@ Run:
 from __future__ import annotations
 
 import argparse
-import json
-import shutil
 import sys
 from pathlib import Path
 
@@ -33,6 +31,12 @@ if str(_EXAMPLES_DIR) not in sys.path:
 from src import samplers
 from src.samplers import _pack_draw_only, _unpack_draw_only
 from src.util import mass_diag_trajectory, welford_settings_from_config
+from config import (
+    SAMPLER_CONFIGS_DIR,
+    add_run_config_args,
+    load_run_configs,
+    save_run_snapshot,
+)
 from targets import load_target
 
 jax.config.update("jax_enable_x64", True)
@@ -52,10 +56,10 @@ def _next_run_dir(runs_parent: Path) -> Path:
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--config",
-        type=Path,
-        default=_EXAMPLES_DIR / "configs" / "banana.json",
+    add_run_config_args(
+        parser,
+        sampler_config=SAMPLER_CONFIGS_DIR / "mala.json",
+        target="banana",
     )
     parser.add_argument(
         "--delta",
@@ -313,10 +317,9 @@ def _print_case_summary(
 
 def main() -> None:
     args = _parse_args()
-    with open(args.config.resolve()) as f:
-        cfg = json.load(f)
+    cfg, _, sampler_path, deer_path = load_run_configs(args)
 
-    target = load_target(cfg["target"], cfg.get("target_params"))
+    target = load_target(args.target)
     D = target.dim
     chain_length = int(args.chain_length or cfg["chain_length"])
     adaptive_mass = cfg["adaptive_mass"]
@@ -357,7 +360,12 @@ def main() -> None:
 
     run_dir = _next_run_dir(RUNS_PARENT)
     run_dir.mkdir(parents=False)
-    shutil.copy2(args.config.resolve(), run_dir / "config.json")
+    save_run_snapshot(
+        run_dir,
+        sampler_path=sampler_path,
+        deer_path=deer_path,
+        target=args.target,
+    )
 
     if args.compare_all_perturbs:
         results: dict[str, dict[str, np.ndarray]] = {}

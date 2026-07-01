@@ -1,0 +1,7 @@
+{
+  "chain_length": 1000,
+  "random_seed": 123,
+  "initial_state_scale": 2.0,
+  "step_size": 0.5,
+  "max_num_doublings": 5
+}

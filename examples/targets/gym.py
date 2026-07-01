@@ -16,7 +16,7 @@ def gym_vector_log_prob(target: gym.targets.VectorModel) -> Callable:
     return log_prob
 
 
-def ill_conditioned_gaussian(*, ndims: int, seed: int = 0) -> TargetSpec:
+def ill_conditioned_gaussian(*, ndims: int = 25, seed: int = 1313) -> TargetSpec:
     target = gym.targets.VectorModel(
         gym.targets.IllConditionedGaussian(ndims=ndims, seed=seed),
         flatten_sample_transformations=True,

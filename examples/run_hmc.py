@@ -1,6 +1,4 @@
 import argparse
-import json
-import shutil
 import sys
 from pathlib import Path
 
@@ -24,12 +22,20 @@ if str(_EXAMPLES_DIR) not in sys.path:
     sys.path.insert(0, str(_EXAMPLES_DIR))
 
 import plot as hmc_plot
+from config import (
+    SAMPLER_CONFIGS_DIR,
+    add_run_config_args,
+    deer_kwargs,
+    load_run_configs,
+    save_run_snapshot,
+)
 from targets import load_target
 
 jax.config.update("jax_enable_x64", True)
 jax.config.update("jax_default_matmul_precision", "highest")
 
-DEFAULT_CONFIG_PATH = _EXAMPLES_DIR / "configs" / "ill_conditioned_gaussian.json"
+DEFAULT_SAMPLER_CONFIG = SAMPLER_CONFIGS_DIR / "hmc.json"
+DEFAULT_TARGET = "ill_conditioned_gaussian"
 RUNS_PARENT = _REPO_ROOT / "experiments" / "hmc_runs"
 
 _SHOW_DEER_PROGRESS = __name__ == "__main__"
@@ -46,34 +52,32 @@ def _next_run_dir(runs_parent: Path) -> Path:
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run parallel HMC with DEER.")
-    parser.add_argument(
-        "--config",
-        type=Path,
-        default=DEFAULT_CONFIG_PATH,
-        help="Path to JSON run config (default: examples/configs/ill_conditioned_gaussian.json).",
+    add_run_config_args(
+        parser,
+        sampler_config=DEFAULT_SAMPLER_CONFIG,
+        target=DEFAULT_TARGET,
     )
     return parser.parse_args()
 
 
 args = _parse_args()
-config_path = args.config.resolve()
-with open(config_path) as f:
-    cfg = json.load(f)
+cfg, deer_cfg, sampler_path, deer_path = load_run_configs(args)
+deer = deer_kwargs(deer_cfg)
 
-target = load_target(cfg["target"], cfg.get("target_params"))
+target = load_target(args.target)
 D = target.dim
 target_log_prob = target.log_prob
 
 chain_length = cfg["chain_length"]
 key = jr.PRNGKey(cfg["random_seed"])
 key, skey = jr.split(key)
-damp_factor = float(cfg["damp_factor"])
-tol = float(cfg["tol"])
-rtol = float(cfg["rtol"])
+damp_factor = deer["damp_factor"]
+tol = deer["tol"]
+rtol = deer["rtol"]
 adaptive_mass = cfg["adaptive_mass"]
-quasi = bool(cfg["quasi"])
-qmem_efficient = bool(cfg["qmem_efficient"])
-clip_val = float(cfg["clip_val"])
+quasi = deer["quasi"]
+qmem_efficient = deer["qmem_efficient"]
+clip_val = deer["clip_val"]
 welford_init = cfg.get("welford_init")
 welford_settings = welford_settings_from_config(cfg)
 
@@ -137,7 +141,12 @@ print(f"DEER converged in {int(iters)} / {max_iter} Newton iterations")
 if __name__ == "__main__":
     run_dir = _next_run_dir(RUNS_PARENT)
     run_dir.mkdir(parents=False)
-    shutil.copy2(config_path, run_dir / "config.json")
+    save_run_snapshot(
+        run_dir,
+        sampler_path=sampler_path,
+        deer_path=deer_path,
+        target=args.target,
+    )
 
     plot_progress = run_dir / "progress.png"
     plot_newton = run_dir / "newton_err.png"

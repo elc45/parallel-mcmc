@@ -16,7 +16,7 @@ TARGETS: dict[str, TargetFactory] = {
 }
 
 
-def load_target(name: str, params: dict | None = None) -> TargetSpec:
+def load_target(name: str) -> TargetSpec:
     if name not in TARGETS:
         raise ValueError(f"Unknown target {name!r}. Choose from {sorted(TARGETS)}")
-    return TARGETS[name](**(params or {}))
+    return TARGETS[name]()
