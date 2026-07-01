@@ -94,7 +94,6 @@ max_iter = chain_length
 params = {
     "epsilon": float(cfg.get("epsilon", 0.5)),
     "mass_adapt_steps": int(cfg.get("mass_adapt_steps", 100)),
-    "mass_reg_steps": int(cfg.get("mass_reg_steps", 10)),
 }
 
 sampler = samplers.ParallelMALA(
@@ -200,7 +199,6 @@ if __name__ == "__main__":
 
     adaptive_mass_mode = samplers._normalize_adaptive_mass(adaptive_mass)
     mass_adapt_steps = params["mass_adapt_steps"]
-    mass_reg_steps = params["mass_reg_steps"]
     welford_method = sampler.welford_method
     welford_n_init = sampler.welford_n_init
     if adaptive_mass_mode is not None:
@@ -209,7 +207,6 @@ if __name__ == "__main__":
             D,
             adaptive_mass_mode,
             mass_adapt_steps,
-            mass_reg_steps=mass_reg_steps,
             welford_method=welford_method,
             welford_n_init=welford_n_init,
         )
@@ -218,7 +215,6 @@ if __name__ == "__main__":
             D,
             adaptive_mass_mode,
             mass_adapt_steps,
-            mass_reg_steps=mass_reg_steps,
             welford_method=welford_method,
             welford_n_init=welford_n_init,
         )

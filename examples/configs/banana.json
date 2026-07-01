@@ -3,20 +3,19 @@
   "target_params": {
     "curvature": 0.05
   },
-  "chain_length": 5000,
+  "chain_length": 500,
   "random_seed": 123,
   "initial_state_scale": 1.0,
   "damp_factor": 1.0,
   "tol": 0.001,
   "rtol": 0.001,
   "adaptive_mass": "draw-only",
-  "welford_method": "discounted",
-  "welford_n_init": 5,
-  "quasi": true,
+  "welford_method": "standard",
+  "welford_n_init": 4,
+  "quasi": false,
   "qmem_efficient": false,
   "clip_val": 1e8,
-  "epsilon": 1.0,
+  "epsilon": 0.01,
   "num_leapfrog_steps": 8,
-  "mass_adapt_steps": 1000,
-  "mass_reg_steps": 10
+  "mass_adapt_steps": 1000
 }

@@ -167,7 +167,6 @@ def mass_diag_trajectory(
     mass_adapt_steps: int,
     clamp: tuple[float, float] = (_MASS_LOWER, _MASS_UPPER),
     fill_invalid: float = 1.0,
-    mass_reg_steps: int | None = None,
     *,
     welford_method: Literal["standard", "discounted"] = "standard",
     welford_n_init: float = 0.0,
@@ -190,9 +189,6 @@ def mass_diag_trajectory(
     mass_adapt_steps:
         Number of leading steps over which the mass matrix is adapted; used to reconstruct
         the (no-longer-stored) Welford sample count via :func:`welford_count_trajectory`.
-    mass_reg_steps:
-        If set, blend mass toward ``fill_invalid`` (identity) early in the chain, tapering
-        linearly to zero over this many Welford counts (default: no extra regularization).
     welford_method:
         ``\"standard\"`` (default) or ``\"discounted\"`` variance accumulator.
     welford_n_init:
@@ -231,10 +227,6 @@ def mass_diag_trajectory(
         np.clip(val, clamp[0], clamp[1]),
         fill_invalid,
     )
-    if mass_reg_steps is not None and mass_reg_steps > 0:
-        blend = np.clip(1.0 - count / float(mass_reg_steps), 0.0, 1.0)
-        blend = np.asarray(blend)[..., None]
-        mass = blend * fill_invalid + (1.0 - blend) * mass
     return mass
 
 

@@ -139,7 +139,6 @@ def main() -> None:
     params = {
         "epsilon": float(args.epsilon),
         "mass_adapt_steps": int(args.mass_adapt_steps),
-        "mass_reg_steps": 0,
     }
 
     print("=" * 72)

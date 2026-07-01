@@ -29,12 +29,14 @@ _EXAMPLES_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = _EXAMPLES_DIR.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
+if str(_EXAMPLES_DIR) not in sys.path:
+    sys.path.insert(0, str(_EXAMPLES_DIR))
 
 from src.samplers import (
     _normalize_welford_method,
     _welford_update_accumulator,
 )
-from src.util import discounted_welford_weight_trajectory
+from src.util import discounted_welford_weight_trajectory, lyapunov_exponent_sequential
 
 jax.config.update("jax_enable_x64", True)
 jax.config.update("jax_default_matmul_precision", "highest")
@@ -206,6 +208,64 @@ def _initial_variance_error(
             np.linalg.norm(m2_pert / (count0 - 1.0) - m2_ref / (count0 - 1.0))
         )
     return 0.0
+
+
+def _make_welford_step_fn(
+    samples: jnp.ndarray,
+    D: int,
+    *,
+    count0: jnp.ndarray | float,
+    welford_method: str,
+    n_init: float,
+):
+    """Return ``(mean, m2)`` map ``y_{t+1} = f(y_t; x_t)`` for Lyapunov analysis."""
+    method = _normalize_welford_method(welford_method)
+    n_init_j = jnp.asarray(n_init, dtype=samples.dtype)
+    count0_j = jnp.asarray(count0, dtype=samples.dtype)
+
+    def step_fn(y: jnp.ndarray, driver) -> jnp.ndarray:
+        _key, t = driver
+        t_idx = jnp.asarray(t, dtype=jnp.int32)
+        count = count0_j + jnp.asarray(t, dtype=samples.dtype)
+        mean, m2 = y[:D], y[D:]
+        sample = samples[t_idx]
+        _count_n, mean_n, m2_n = _welford_update_accumulator(
+            method, count, mean, m2, sample, n_init=n_init_j
+        )
+        return jnp.concatenate([mean_n, m2_n])
+
+    return step_fn
+
+
+def _compute_welford_lyapunov(
+    samples: jnp.ndarray,
+    mean0: jnp.ndarray,
+    m2_0: jnp.ndarray,
+    count0: jnp.ndarray | float,
+    *,
+    seed: int,
+    welford_method: str,
+    n_init: float,
+) -> dict:
+    """Largest Lyapunov exponent via FTLE = (1/t) sum_{k<t} log ||J_k v_k||."""
+    D = int(mean0.shape[-1])
+    y0 = jnp.concatenate([mean0, m2_0])
+    chain_length = int(samples.shape[0])
+    step_fn = _make_welford_step_fn(
+        samples,
+        D,
+        count0=count0,
+        welford_method=welford_method,
+        n_init=n_init,
+    )
+    return lyapunov_exponent_sequential(
+        step_fn,
+        y0,
+        jr.PRNGKey(seed),
+        chain_length,
+        jr.PRNGKey(seed + 1),
+        tangent_subspace="full",
+    )
 
 
 def _batch_variance_traj(samples: np.ndarray) -> np.ndarray:
@@ -464,6 +524,57 @@ def _make_plot(
     plt.close(fig)
 
 
+def _make_welford_ftle_plot(
+    lyap: dict,
+    *,
+    savepath: Path,
+    title: str,
+    tail_frac: float = 0.5,
+) -> None:
+    """Plot running FTLE with a tail zoom (early spikes are finite-time transients)."""
+    ftle = np.asarray(lyap["ftle"])
+    t = np.arange(1, ftle.shape[0] + 1, dtype=float)
+    lam = float(lyap["lyapunov_exponent"])
+    lam_tail = float(lyap["lyapunov_exponent_tail"])
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
+
+    ax = axes[0]
+    ax.plot(t, ftle, lw=1.2, color="C0", label=r"$(1/t)\sum_{k<t}\log\|J_k v_k\|$")
+    ax.axhline(lam, color="k", ls="--", lw=1.0, alpha=0.7, label=rf"$\lambda_1$ (final) = {lam:.4g}")
+    ax.axhline(0.0, color="gray", ls=":", lw=0.8, alpha=0.6)
+    ax.set_xlabel("update index $t$")
+    ax.set_ylabel("running FTLE")
+    ax.set_title("Full chain (early transient visible)")
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=8, loc="best")
+    if ftle[0] > 0 and lam < 0:
+        ax.annotate(
+            "early $t$: not $\\lambda_1$\n(singular start at mean=s=0)",
+            xy=(1.0, float(ftle[0])),
+            xytext=(max(50.0, 0.02 * t[-1]), float(ftle[0]) * 0.65),
+            fontsize=8,
+            arrowprops={"arrowstyle": "->", "lw": 0.8},
+        )
+
+    ax = axes[1]
+    tail_start = max(1, int(ftle.shape[0] * (1.0 - tail_frac)))
+    ax.plot(t[tail_start - 1 :], ftle[tail_start - 1 :], lw=1.2, color="C0")
+    ax.axhline(lam, color="k", ls="--", lw=1.0, alpha=0.7, label=rf"final = {lam:.4g}")
+    ax.axhline(lam_tail, color="C3", ls="-.", lw=1.0, alpha=0.8, label=rf"tail mean = {lam_tail:.4g}")
+    ax.axhline(0.0, color="gray", ls=":", lw=0.8, alpha=0.6)
+    ax.set_xlabel("update index $t$")
+    ax.set_ylabel("running FTLE")
+    ax.set_title(f"Tail zoom (last {int(100 * tail_frac)}%)")
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=8, loc="best")
+
+    fig.suptitle(title, fontsize=12, fontweight="bold")
+    fig.tight_layout()
+    fig.savefig(savepath, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
 def main() -> None:
     args = _parse_args()
     D = int(args.dim)
@@ -523,7 +634,35 @@ def main() -> None:
     }
     with open(run_dir / "config.json", "w") as f:
         json.dump(meta, f, indent=2)
-    np.save(run_dir / "samples.npy", samples_np)
+
+    stream_j = jnp.asarray(stream)
+    lyap = _compute_welford_lyapunov(
+        stream_j,
+        mean0,
+        m2_0,
+        count0,
+        seed=int(args.seed),
+        welford_method=welford_method,
+        n_init=n_init,
+    )
+    meta["lyapunov_exponent"] = lyap["lyapunov_exponent"]
+    meta["lyapunov_exponent_tail"] = lyap["lyapunov_exponent_tail"]
+    with open(run_dir / "config.json", "w") as f:
+        json.dump(meta, f, indent=2)
+    n_init_note = f", $n^{{\\mathrm{{init}}}}={n_init:g}$" if welford_method == "discounted" else ""
+    _make_welford_ftle_plot(
+        lyap,
+        savepath=run_dir / "ftle.png",
+        title=(
+            f"{method_title} FTLE on i.i.d. draws ({dist_label}{n_init_note})\n"
+            rf"asymptotic $\lambda_1 \approx$ {lyap['lyapunov_exponent']:.4g} "
+            f"(tail {lyap['lyapunov_exponent_tail']:.4g})"
+        ),
+    )
+    print(
+        f"  Lyapunov exponent: {lyap['lyapunov_exponent']:.6e} "
+        f"(tail: {lyap['lyapunov_exponent_tail']:.6e})"
+    )
 
     if args.compare_all_perturbs:
         results: dict[str, dict] = {}
@@ -549,10 +688,6 @@ def main() -> None:
             warm_start=int(args.warm_start),
             savepath=run_dir / "m2_noncontraction.png",
             **plot_kw,
-        )
-        np.savez(
-            run_dir / "ic_sensitivity_all_perturbs.npz",
-            **{f"{p}_{k}": v for p, r in results.items() for k, v in r["errors"].items()},
         )
     else:
         case = _run_case(
@@ -587,10 +722,6 @@ def main() -> None:
                 savepath=run_dir / "ic_sensitivity.png",
                 **plot_kw,
             )
-        np.save(run_dir / "mean_ref.npy", case["mean_ref"])
-        np.save(run_dir / "mean_pert.npy", case["mean_pert"])
-        np.save(run_dir / "var_ref.npy", case["var_ref"])
-        np.save(run_dir / "var_pert.npy", case["var_pert"])
 
     print(f"\nSaved under {run_dir}")
 

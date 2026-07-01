@@ -13,9 +13,5 @@
   "clip_val": 1e8,
   "epsilon": 0.5,
   "num_leapfrog_steps": 4,
-  "mass_adapt_steps": 100,
-  "welford_init": {
-    "mean": "zeros",
-    "m2": "zeros"
-  }
+  "mass_adapt_steps": 100
 }

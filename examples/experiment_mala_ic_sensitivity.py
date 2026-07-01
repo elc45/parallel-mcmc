@@ -82,12 +82,6 @@ def _parse_args() -> argparse.Namespace:
         help="Override config epsilon.",
     )
     parser.add_argument(
-        "--mass-reg-steps",
-        type=int,
-        default=None,
-        help="Override config mass_reg_steps.",
-    )
-    parser.add_argument(
         "--compare-all-perturbs",
         action="store_true",
         help="Run all perturbation types and save one summary figure.",
@@ -284,7 +278,6 @@ def _run_one_case(
         D,
         mode,
         params["mass_adapt_steps"],
-        mass_reg_steps=params["mass_reg_steps"],
         welford_method=welford_method,
         welford_n_init=welford_n_init,
     )
@@ -293,7 +286,6 @@ def _run_one_case(
         D,
         mode,
         params["mass_adapt_steps"],
-        mass_reg_steps=params["mass_reg_steps"],
         welford_method=welford_method,
         welford_n_init=welford_n_init,
     )
@@ -339,9 +331,6 @@ def main() -> None:
     params = {
         "epsilon": float(args.epsilon if args.epsilon is not None else cfg.get("epsilon", 0.5)),
         "mass_adapt_steps": int(cfg.get("mass_adapt_steps", 100)),
-        "mass_reg_steps": int(
-            args.mass_reg_steps if args.mass_reg_steps is not None else cfg.get("mass_reg_steps", 10)
-        ),
     }
 
     sampler = samplers.ParallelMALA(
@@ -361,8 +350,7 @@ def main() -> None:
     print("Adaptive MALA initial-condition sensitivity")
     print(
         f"  target={target.name}  D={D}  chain_length={chain_length}  "
-        f"adaptive_mass={mode}  epsilon={params['epsilon']}  "
-        f"mass_reg_steps={params['mass_reg_steps']}"
+        f"adaptive_mass={mode}  epsilon={params['epsilon']}"
     )
     print(f"  delta={delta:g}")
     print("-" * 72)
