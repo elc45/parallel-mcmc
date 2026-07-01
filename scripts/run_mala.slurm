@@ -12,6 +12,7 @@
 # Check status:  squeue -u "$USER"
 # Cancel:         scancel <job_id>
 
+#SBATCH --partition=gpu
 #SBATCH --job-name=mala_test
 #SBATCH --output=logs/mala_test_%j.out
 #SBATCH --error=logs/mala_test_%j.err
@@ -20,7 +21,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=16G
-#SBATCH --partition=gpu
+#SBATCH --gpus-per-task=1
 #SBATCH --account=ecarlson
 
 set -euo pipefail
@@ -79,4 +80,4 @@ if jax.default_backend() != "gpu":
     )
 PY
 
-python examples/run_mala.py --config "${CONFIG}"
+srun python examples/run_mala.py --config "${CONFIG}"
