@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "parallel-mcmc"
 version = "0.1.0"
 description = "Algorithms for Parallel Evaluation of MCMC Samplers"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.13"
 readme = "README.md"
 license = {file="LICENSE"}
 dependencies = [
@@ -16,8 +16,7 @@ dependencies = [
   "numpy==1.26.4",
   "scipy==1.11.4",
   "ml-dtypes==0.3.2",
-  "jax==0.4.23",
-  "jaxlib==0.4.23",
+  "jax[cuda12_pip]==0.4.23",
   "tensorflow==2.16.2",
   "tensorflow-probability==0.24.0",
   "tensorflow-datasets==4.9.9",
@@ -29,6 +28,7 @@ dependencies = [
   "tf-keras>=2.16.0",
   "blackjax==1.2.5",
   "optax==0.2.2",
+  "nvidia-cudnn-cu12>=8.9,<9",
 ]
 authors = [
     {name="David Zoltowski"}, 
@@ -47,3 +47,6 @@ homepage = "https://github.com/lindermanlab/parallel-mcmc"
 
 [tool.setuptools.packages.find]
 where = ["."]
+
+[tool.uv]
+find-links = ["https://storage.googleapis.com/jax-releases/jax_cuda_releases.html"]

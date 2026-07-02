@@ -8,3 +8,4 @@ sandbox.ipynb
 *.DS_Store
 analysis.ipynb
 experiments/
+logs/

@@ -45,6 +45,19 @@ from targets import load_target
 jax.config.update("jax_enable_x64", True)
 jax.config.update("jax_default_matmul_precision", "highest")
 
+def _require_gpu() -> None:
+    backend = jax.default_backend()
+    if backend != "gpu":
+        raise RuntimeError(
+            f"JAX is using backend '{backend}', but a GPU is required. "
+            "Install a CUDA-enabled jaxlib and run on a machine with a visible GPU."
+        )
+    gpu_devices = jax.devices("gpu")
+    if not gpu_devices:
+        raise RuntimeError("No GPU devices found.")
+    print(f"JAX GPU backend: {gpu_devices[0]}")
+
+
 DEFAULT_SAMPLER_CONFIG = SAMPLER_CONFIGS_DIR / "mala.json"
 DEFAULT_TARGET = "gaussian_2d"
 RUNS_PARENT = _REPO_ROOT / "experiments" / "mala_runs"
@@ -160,6 +173,7 @@ states_par, iters = run_parallel(key, initial_state, init_trajectory_guess, para
 print(f"DEER converged in {int(iters)} / {max_iter} Newton iterations")
 
 if __name__ == "__main__":
+    _require_gpu()
     run_dir = _next_run_dir(RUNS_PARENT)
     run_dir.mkdir(parents=False)
     save_run_snapshot(
@@ -182,19 +196,6 @@ if __name__ == "__main__":
         quasi=quasi,
         savepath=plot_progress,
         suptitle=f"{chain_length} MALA draws",
-    )
-    hmc_plot.newton_max_error_plot(
-        states_par,
-        rtol=rtol,
-        savepath=plot_newton,
-        title=f"DEER Newton error, MALA ({target.name})",
-    )
-    hmc_plot.newton_truth_error_plot(
-        states_par,
-        states_seq,
-        dim=D,
-        savepath=plot_newton_truth,
-        title=f"Parallel-vs-sequential trajectory error, MALA ({target.name})",
     )
 
     states_par_np = np.asarray(jax.device_get(states_par))
@@ -228,12 +229,7 @@ if __name__ == "__main__":
             welford_n_init=welford_n_init,
         )
         np.save(run_dir / "mass_matrix_seq.npy", mass_seq)
-        hmc_plot.newton_mass_truth_error_plot(
-            mass_par,
-            mass_seq,
-            savepath=run_dir / "newton_mass_truth_err.png",
-            title=f"Parallel-vs-sequential mass matrix error, MALA ({target.name})",
-        )
+        
         print(f"Saved sequential mass matrix (mass_matrix_seq.npy) and convergence plot under {run_dir}")
 
     print("Creating GIFs...")
