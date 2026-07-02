@@ -152,35 +152,33 @@ if __name__ == "__main__":
     plot_newton = run_dir / "newton_err.png"
     plot_newton_truth = run_dir / "newton_truth_err.png"
 
+    states_par_np = hmc_plot.trim_newton_trace(states_par, iters)
+    newton_iters = hmc_plot.sample_newton_iterations(iters)
+
     hmc_plot.progress_plot(
-        states_par,
+        states_par_np,
         states_seq,
         initial_state,
-        [1, 10, (max_iter//2), max_iter],
+        newton_iters,
         chain_length=chain_length,
         quasi=quasi,
         savepath=plot_progress,
     )
     hmc_plot.newton_max_error_plot(
-        states_par,
+        states_par_np,
         rtol=rtol,
         savepath=plot_newton,
         title=f"DEER Newton error ({target.name})",
     )
     hmc_plot.newton_truth_error_plot(
-        states_par,
+        states_par_np,
         states_seq,
         dim=D,
         savepath=plot_newton_truth,
         title=f"Parallel-vs-sequential trajectory error ({target.name})",
     )
 
-    states_par_np = np.asarray(jax.device_get(states_par))
-    # The DEER scan always runs the full max_iter Newton steps (post-convergence iterates
-    # are identical copies). Trim those redundant trailing iterates before saving: keep the
-    # initial guess (index 0) through the converged iterate (index `iters`).
-    n_keep = min(int(iters) + 1, states_par_np.shape[0])
-    np.save(run_dir / "states_par.npy", states_par_np[:n_keep])
+    np.save(run_dir / "states_par.npy", states_par_np)
 
     states_seq_np = np.asarray(jax.device_get(states_seq))
     np.save(run_dir / "states_seq.npy", states_seq_np)
@@ -209,13 +207,17 @@ if __name__ == "__main__":
             welford_n_init=welford_n_init,
         )
         np.save(run_dir / "mass_matrix_seq.npy", mass_seq)
+        np.save(run_dir / "mass_matrix_par.npy", mass_par)
         hmc_plot.newton_mass_truth_error_plot(
             mass_par,
             mass_seq,
             savepath=run_dir / "newton_mass_truth_err.png",
             title=f"Parallel-vs-sequential mass matrix error ({target.name})",
         )
-        print(f"Saved sequential mass matrix (mass_matrix_seq.npy) and convergence plot under {run_dir}")
+        print(
+            f"Saved sequential mass matrix (mass_matrix_seq.npy), "
+            f"parallel mass matrix (mass_matrix_par.npy), and convergence plot under {run_dir}"
+        )
 
     print("Creating GIFs...")
     if adaptive_mass_mode is not None:

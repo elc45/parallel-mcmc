@@ -18,10 +18,16 @@ def gaussian_2d() -> TargetSpec:
     """2D zero-mean Gaussian with diagonal covariance (5, 1)."""
     return diagonal_gaussian(variances=[5.0, 1.0], name="gaussian_2d")
 
-
 def gaussian_10d() -> TargetSpec:
     """10D zero-mean Gaussian with diagonal variances 1, 2, ..., 10."""
     return diagonal_gaussian(
         variances=list(range(1, 11)),
         name="gaussian_10d",
+    )
+
+def gaussian_100d() -> TargetSpec:
+    """100D zero-mean Gaussian with diagonal variances 1, 2, ..., 100."""
+    return diagonal_gaussian(
+        variances=list(range(1, 101)),
+        name="gaussian_100d",
     )

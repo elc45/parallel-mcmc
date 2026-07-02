@@ -1,11 +1,11 @@
 #!/bin/bash
 
 # Override target / configs at submit time:
-#   sbatch scripts/run_mala.slurm banana
-#   sbatch scripts/run_mala.slurm gaussian_2d examples/configs/samplers/mala.json
+#   sbatch scripts/single_run.slurm banana
+#   sbatch scripts/single_run.slurm gaussian_2d examples/configs/samplers/mala.json
 #
 # Override branch (default: microcanonical):
-#   GIT_BRANCH=microcanonical sbatch scripts/run_mala.slurm
+#   GIT_BRANCH=microcanonical sbatch scripts/single_run.slurm
 #
 # Check status:  squeue -u "$USER"
 # Cancel:         scancel <job_id>
@@ -14,10 +14,10 @@
 #SBATCH --job-name=mala_test
 #SBATCH --output=logs/mala_test_%j.out
 #SBATCH --error=logs/mala_test_%j.err
-#SBATCH --time=00:10:00
+#SBATCH --time=00:20:00
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1
-#SBATCH --mem=64G
+#SBATCH --mem=128G
 #SBATCH --gpus-per-task=1
 
 set -euo pipefail

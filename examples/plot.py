@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Sequence
 
+import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
@@ -72,7 +73,33 @@ def _mask_outside_limits(
     return np.where(oob, np.nan, x), np.where(oob, np.nan, y)
 
 
-def newton_max_errors(states_par: jnp.ndarray, rtol: float | None = None) -> jnp.ndarray:
+def _to_numpy(arr: jnp.ndarray | np.ndarray) -> np.ndarray:
+    if isinstance(arr, np.ndarray):
+        return arr
+    return np.asarray(jax.device_get(arr))
+
+
+def trim_newton_trace(
+    states_par: jnp.ndarray | np.ndarray,
+    converged_iters: int,
+) -> np.ndarray:
+    """Host numpy trace through Newton iterate ``converged_iters`` (inclusive).
+
+    DEER scans materialize ``max_iter + 1`` iterates even after early convergence; drop the
+    identical post-convergence tail before plotting or saving.
+    """
+    arr = _to_numpy(states_par)
+    n_keep = min(int(converged_iters) + 1, arr.shape[0])
+    return arr[:n_keep]
+
+
+def sample_newton_iterations(converged_iters: int) -> list[int]:
+    """Representative Newton indices for progress panels."""
+    iters = int(converged_iters)
+    return [1, 10, max(1, iters // 2), iters]
+
+
+def newton_max_errors(states_par: jnp.ndarray | np.ndarray, rtol: float | None = None) -> np.ndarray:
     """Scalar DEER-style error per Newton step (matches ``deer.deer_iteration_helper.scan_func``).
 
     For consecutive trajectory iterates ``Y_{k-1}, Y_k`` (first axis of ``states_par``),
@@ -87,18 +114,19 @@ def newton_max_errors(states_par: jnp.ndarray, rtol: float | None = None) -> jnp
         Relative tolerance scale. If ``None``, uses ``1e-7`` for float64 and ``1e-4`` otherwise
         (same defaults as ``src.deer.seq1d`` when ``rtol`` is not passed).
     """
-    dtype = states_par.dtype
+    arr = _to_numpy(states_par)
     if rtol is None:
-        rtol = 1e-7 if dtype == jnp.float64 else 1e-4
-    prev = states_par[:-1]
-    nxt = states_par[1:]
-    diff_term = jnp.abs(nxt - prev) - rtol * jnp.abs(prev)
-    axes = tuple(range(1, diff_term.ndim))
-    return jnp.max(diff_term, axis=axes)
+        rtol = 1e-7 if arr.dtype == np.float64 else 1e-4
+    errors = np.empty(arr.shape[0] - 1, dtype=arr.dtype)
+    for k in range(1, arr.shape[0]):
+        prev = arr[k - 1]
+        nxt = arr[k]
+        errors[k - 1] = np.max(np.abs(nxt - prev) - rtol * np.abs(prev))
+    return errors
 
 
 def newton_max_error_plot(
-    states_par: jnp.ndarray,
+    states_par: jnp.ndarray | np.ndarray,
     *,
     rtol: float | None = None,
     newton_iterations_start_at: int = 1,
@@ -113,7 +141,7 @@ def newton_max_error_plot(
     transitions ``states_par[k-1] -> states_par[k]``.
     """
     errors = newton_max_errors(states_par, rtol=rtol)
-    iters = jnp.arange(errors.shape[0], dtype=jnp.int32) + int(newton_iterations_start_at)
+    iters = np.arange(errors.shape[0], dtype=np.int32) + int(newton_iterations_start_at)
 
     created_fig = ax is None
     if created_fig:
@@ -121,7 +149,7 @@ def newton_max_error_plot(
     else:
         fig = ax.figure
 
-    ax.plot(iters, jnp.log(errors), marker="o", ms=3, lw=1.2)
+    ax.plot(iters, np.log(errors), marker="o", ms=3, lw=1.2)
     ax.set_xlabel("Newton iteration", fontsize=12)
     ax.set_ylabel(r"log($\max \; |\Delta Y| - \mathrm{rtol}\,|Y_{\mathrm{prev}}|$)", fontsize=11)
     if title is not None:
@@ -134,21 +162,27 @@ def newton_max_error_plot(
     return fig, ax
 
 
-def _max_abs_error_vs_truth(par_traj: jnp.ndarray, truth_traj: jnp.ndarray) -> jnp.ndarray:
+def _max_abs_error_vs_truth(
+    par_traj: jnp.ndarray | np.ndarray,
+    truth_traj: jnp.ndarray | np.ndarray,
+) -> np.ndarray:
     """Max ``|par_traj[k] - truth_traj|`` over all non-leading axes, for each leading index ``k``.
 
     ``par_traj`` has a leading Newton-iteration axis; ``truth_traj`` matches its trailing shape.
     """
-    diff = jnp.abs(par_traj - truth_traj[None])
-    axes = tuple(range(1, diff.ndim))
-    return jnp.max(diff, axis=axes)
+    par = _to_numpy(par_traj)
+    truth = _to_numpy(truth_traj)
+    errors = np.empty(par.shape[0], dtype=par.dtype)
+    for k in range(par.shape[0]):
+        errors[k] = np.max(np.abs(par[k] - truth))
+    return errors
 
 
 def newton_truth_max_errors(
-    states_par: jnp.ndarray,
-    states_seq: jnp.ndarray,
+    states_par: jnp.ndarray | np.ndarray,
+    states_seq: jnp.ndarray | np.ndarray,
     dim: int | None = None,
-) -> jnp.ndarray:
+) -> np.ndarray:
     """Maximum raw error between each parallel Newton iterate and the true (sequential) trajectory.
 
     For each Newton iterate ``Y_k`` (first axis of ``states_par``, where index ``0`` is the
@@ -175,9 +209,9 @@ def newton_truth_max_errors(
 
 
 def newton_mass_truth_max_errors(
-    mass_par: jnp.ndarray,
-    mass_seq: jnp.ndarray,
-) -> jnp.ndarray:
+    mass_par: jnp.ndarray | np.ndarray,
+    mass_seq: jnp.ndarray | np.ndarray,
+) -> np.ndarray:
     """Maximum raw error between each parallel Newton iterate's mass matrix and the true one.
 
     Parameters
@@ -187,12 +221,12 @@ def newton_mass_truth_max_errors(
     mass_seq
         Sequential ("true") diagonal mass matrix, shape ``(T, D)``.
     """
-    return _max_abs_error_vs_truth(jnp.asarray(mass_par), jnp.asarray(mass_seq))
+    return _max_abs_error_vs_truth(mass_par, mass_seq)
 
 
 def newton_truth_error_plot(
-    states_par: jnp.ndarray,
-    states_seq: jnp.ndarray,
+    states_par: jnp.ndarray | np.ndarray,
+    states_seq: jnp.ndarray | np.ndarray,
     *,
     dim: int | None = None,
     newton_iterations_start_at: int = 0,
@@ -207,7 +241,7 @@ def newton_truth_error_plot(
     so index ``0`` is the initial trajectory guess).
     """
     errors = newton_truth_max_errors(states_par, states_seq, dim=dim)
-    iters = jnp.arange(errors.shape[0], dtype=jnp.int32) + int(newton_iterations_start_at)
+    iters = np.arange(errors.shape[0], dtype=np.int32) + int(newton_iterations_start_at)
 
     created_fig = ax is None
     if created_fig:
@@ -215,7 +249,7 @@ def newton_truth_error_plot(
     else:
         fig = ax.figure
 
-    ax.plot(iters, jnp.log(errors), marker="o", ms=3, lw=1.2, color="C3")
+    ax.plot(iters, np.log(errors), marker="o", ms=3, lw=1.2, color="C3")
     ax.set_xlabel("Newton iteration", fontsize=12)
     ax.set_ylabel(r"log($\max \; |Y_{\mathrm{par}} - Y_{\mathrm{seq}}|$)", fontsize=11)
     if title is not None:
@@ -229,8 +263,8 @@ def newton_truth_error_plot(
 
 
 def newton_mass_truth_error_plot(
-    mass_par: jnp.ndarray,
-    mass_seq: jnp.ndarray,
+    mass_par: jnp.ndarray | np.ndarray,
+    mass_seq: jnp.ndarray | np.ndarray,
     *,
     newton_iterations_start_at: int = 0,
     figsize: tuple[float, float] = (7.0, 4.0),
@@ -245,7 +279,7 @@ def newton_mass_truth_error_plot(
     mass matrix implied by the initial trajectory guess).
     """
     errors = newton_mass_truth_max_errors(mass_par, mass_seq)
-    iters = jnp.arange(errors.shape[0], dtype=jnp.int32) + int(newton_iterations_start_at)
+    iters = np.arange(errors.shape[0], dtype=np.int32) + int(newton_iterations_start_at)
 
     created_fig = ax is None
     if created_fig:
@@ -253,7 +287,7 @@ def newton_mass_truth_error_plot(
     else:
         fig = ax.figure
 
-    ax.plot(iters, jnp.log(errors), marker="o", ms=3, lw=1.2, color="C2")
+    ax.plot(iters, np.log(errors), marker="o", ms=3, lw=1.2, color="C2")
     ax.set_xlabel("Newton iteration", fontsize=12)
     ax.set_ylabel(r"log($\max_{i}\; |M_{i, \mathrm{par}} - M_{i, \mathrm{seq}}|$)", fontsize=11)
     if title is not None:

@@ -140,32 +140,33 @@ if __name__ == "__main__":
     plot_newton = run_dir / "newton_err.png"
     plot_newton_truth = run_dir / "newton_truth_err.png"
 
+    states_par_np = hmc_plot.trim_newton_trace(states_par, iters)
+    newton_iters = hmc_plot.sample_newton_iterations(iters)
+
     hmc_plot.progress_plot(
-        states_par,
+        states_par_np,
         states_seq,
         initial_state,
-        [1, 10, (max_iter // 2), max_iter],
+        newton_iters,
         chain_length=chain_length,
         quasi=quasi,
         savepath=plot_progress,
     )
     hmc_plot.newton_max_error_plot(
-        states_par,
+        states_par_np,
         rtol=rtol,
         savepath=plot_newton,
         title=f"DEER Newton error ({target.name}, MCLMC)",
     )
     hmc_plot.newton_truth_error_plot(
-        states_par,
+        states_par_np,
         states_seq,
         dim=D,
         savepath=plot_newton_truth,
         title=f"Parallel-vs-sequential trajectory error ({target.name}, MCLMC)",
     )
 
-    states_par_np = np.asarray(jax.device_get(states_par))
-    n_keep = min(int(iters) + 1, states_par_np.shape[0])
-    np.save(run_dir / "states_par.npy", states_par_np[:n_keep])
+    np.save(run_dir / "states_par.npy", states_par_np)
 
     states_seq_np = np.asarray(jax.device_get(states_seq))
     np.save(run_dir / "states_seq.npy", states_seq_np)
