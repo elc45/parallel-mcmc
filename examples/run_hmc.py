@@ -26,6 +26,7 @@ from config import (
     SAMPLER_CONFIGS_DIR,
     add_run_config_args,
     deer_kwargs,
+    finalize_run,
     load_run_configs,
     save_run_snapshot,
 )
@@ -108,9 +109,13 @@ sampler = samplers.ParallelHMC(
     **welford_settings,
 )
 
-run_sequential = jax.jit(sampler.run_sequential_hmc_full)
-states_seq_full = run_sequential(key, initial_state, params)
+run_sequential = jax.jit(sampler.run_sequential_hmc_full_with_accepts)
+states_seq_full, seq_accepts = run_sequential(key, initial_state, params)
 states_seq = states_seq_full[..., :D]
+print(
+    "Sequential trajectory Metropolis acceptance rate: "
+    f"{float(jnp.mean(seq_accepts)):.4f}"
+)
 
 init_trajectory_guess = initial_state[None, :] * jnp.ones((chain_length, D))
 max_iter = chain_length
@@ -278,4 +283,7 @@ if __name__ == "__main__":
             f"(tail: {lyap['lyapunov_exponent_tail']:.4f}, tangent={tangent_subspace})"
         )
 
-    print(f"Saved config, plots, states_par.npy, states_seq.npy, and GIFs under {run_dir}")
+    finalize_run(
+        run_dir,
+        message=f"Saved config, plots, states_par.npy, states_seq.npy, and GIFs under {run_dir}",
+    )

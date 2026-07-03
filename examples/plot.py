@@ -96,7 +96,16 @@ def trim_newton_trace(
 def sample_newton_iterations(converged_iters: int) -> list[int]:
     """Representative Newton indices for progress panels."""
     iters = int(converged_iters)
-    return [1, 10, max(1, iters // 2), iters]
+    if iters <= 0:
+        return [0]
+    candidates = [1, 10, max(1, iters // 2), iters]
+    seen: set[int] = set()
+    out: list[int] = []
+    for i in candidates:
+        if 1 <= i <= iters and i not in seen:
+            seen.add(i)
+            out.append(i)
+    return out
 
 
 def newton_max_errors(states_par: jnp.ndarray | np.ndarray, rtol: float | None = None) -> np.ndarray:

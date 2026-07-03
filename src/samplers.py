@@ -539,8 +539,8 @@ class ParallelHMC:
             return _unpack_draw_only(packed, D)
         return _unpack_grad_adaptive_state(packed, D)
 
-    def _hmc_adaptive_mass(self, packed_state: jnp.ndarray, driver, params):
-        """One HMC step with diagonal adaptive mass (draw-only or draw/score ratio); packed layout set by mode."""
+    def _hmc_adaptive_mass_step(self, packed_state: jnp.ndarray, driver, params):
+        """One HMC step with diagonal adaptive mass; returns ``(packed_state, accepted)``."""
         D = self.D
         step_size = params["epsilon"]
         num_steps = params["num_leapfrog_steps"]
@@ -617,7 +617,7 @@ class ParallelHMC:
                 lambda _: (count, mean_draw, m2_draw),
                 operand=None,
             )
-            return _pack_draw_only(new_position, mean_n, m2_n)
+            return _pack_draw_only(new_position, mean_n, m2_n), g
 
         grad_chain = g * new_tlp_grad + (1.0 - g) * tlp_grad
         _, mean_draw_n, m2_draw_n = jax.lax.cond(
@@ -648,40 +648,52 @@ class ParallelHMC:
         )
         return _pack_adaptive_state(
             new_position, mean_draw_n, m2_draw_n, mean_grad_n, m2_grad_n
-        )
+        ), g
 
-    def hmc_fn_for_deer(self, state, driver, params):
-        if self.adaptive_mass is not None:
-            return self._hmc_adaptive_mass(state, driver, params)
+    def _hmc_adaptive_mass(self, packed_state: jnp.ndarray, driver, params):
+        packed, _ = self._hmc_adaptive_mass_step(packed_state, driver, params)
+        return packed
 
+    def _hmc_fixed_step(self, position, driver, params):
+        """One fixed-mass HMC step; returns ``(new_position, accepted)``."""
         seed, _t = driver
-        position = state 
-        step_size = params['epsilon'] 
-        momentum_seed, mh_seed = jax.random.split(seed)
+        step_size = params["epsilon"]
+        momentum_seed, mh_seed = jr.split(seed)
         tlp, tlp_grad = self.target_log_prob_and_grad(position)
-        momentum = jax.random.normal(momentum_seed, position.shape)
+        momentum = jr.normal(momentum_seed, position.shape)
         energy = 0.5 * jnp.square(momentum).sum() - tlp
 
-        # Initial half-step of momentum
-        momentum += 0.5 * step_size * tlp_grad
+        momentum = momentum + 0.5 * step_size * tlp_grad
 
         init_state = jnp.concatenate((position, momentum))
-        new_state = jax.lax.fori_loop(0, params['num_leapfrog_steps'],
-            lambda i, state : self.scan_leapfrog(state, step_size), 
-            init_state)
+        new_state = jax.lax.fori_loop(
+            0,
+            params["num_leapfrog_steps"],
+            lambda _, state: self.scan_leapfrog(state, step_size),
+            init_state,
+        )
         new_position, new_momentum = jnp.split(new_state, 2)
         new_tlp, new_tlp_grad = self.target_log_prob_and_grad(new_position)
 
-        # Final backward half-step of momentum
-        new_momentum -= 0.5 * step_size * new_tlp_grad 
+        new_momentum = new_momentum - 0.5 * step_size * new_tlp_grad
 
         new_energy = 0.5 * jnp.square(new_momentum).sum() - new_tlp
         log_accept_ratio = energy - new_energy
 
-        # accept-reject
-        u = jax.random.uniform(mh_seed, [])
-        g = sigmoid_accept(log_accept_ratio-jnp.log(u))
-        new_position = g*new_position + (1.0-g)*position
+        u = jr.uniform(mh_seed, [])
+        g = sigmoid_accept(log_accept_ratio - jnp.log(u))
+        new_position = g * new_position + (1.0 - g) * position
+        return new_position, g
+
+    def _sequential_transition_with_accept(self, state, driver, params):
+        if self.adaptive_mass is not None:
+            return self._hmc_adaptive_mass_step(state, driver, params)
+        return self._hmc_fixed_step(state, driver, params)
+
+    def hmc_fn_for_deer(self, state, driver, params):
+        if self.adaptive_mass is not None:
+            return self._hmc_adaptive_mass(state, driver, params)
+        new_position, _ = self._hmc_fixed_step(state, driver, params)
         return new_position
 
     def _run_sequential_packed(self, key, initial_state, params):
@@ -700,6 +712,22 @@ class ParallelHMC:
         _, out_states = jax.lax.scan(_fn_for_scan, init, drivers)
         return out_states
 
+    def _run_sequential_packed_with_accepts(self, key, initial_state, params):
+        """Sequential chain returning ``(states, accepts)`` with one accept flag per step."""
+
+        def _fn_for_scan(state, driver):
+            nxt, accepted = self._sequential_transition_with_accept(state, driver, params)
+            return nxt, (nxt, accepted)
+
+        drivers = (jr.split(key, (self.chain_length,)), jnp.arange(self.chain_length))
+        init = (
+            self._initial_packed_state(initial_state)
+            if self.adaptive_mass is not None
+            else initial_state
+        )
+        _, (out_states, accepts) = jax.lax.scan(_fn_for_scan, init, drivers)
+        return out_states, accepts
+
     def run_sequential_hmc(self, key, initial_state, params):
         out_states = self._run_sequential_packed(key, initial_state, params)
         return (
@@ -717,6 +745,10 @@ class ParallelHMC:
         identical to :meth:`run_sequential_hmc` (the state is already positions only).
         """
         return self._run_sequential_packed(key, initial_state, params)
+
+    def run_sequential_hmc_full_with_accepts(self, key, initial_state, params):
+        """Like :meth:`run_sequential_hmc_full`, also returning per-step Metropolis accepts."""
+        return self._run_sequential_packed_with_accepts(key, initial_state, params)
 
     def run_parallel_hmc(self, key, initial_state, init_trajectory_guess, params):
         deer_params = params
@@ -781,7 +813,7 @@ class ParallelMALA(ParallelHMC):
     def _mala_propose_accept(self, position, mass_diag, seed, step_size):
         """One MALA proposal + Metropolis step at fixed diagonal ``mass_diag`` (= M).
 
-        Returns ``(new_position, grad_at_new)`` where the gradient is the accept/reject blend of
+        Returns ``(new_position, grad_at_new, accepted)`` where the gradient is the accept/reject blend of
         the score at the proposal and at the current point (used by the ``grad`` Welford
         accumulator, mirroring :meth:`ParallelHMC._hmc_adaptive_mass`).
         """
@@ -805,10 +837,10 @@ class ParallelMALA(ParallelHMC):
         g = sigmoid_accept(log_accept_ratio - jnp.log(u))
         new_position = g * proposal + (1.0 - g) * position
         grad_new = g * grad_y + (1.0 - g) * grad_x
-        return new_position, grad_new
+        return new_position, grad_new, g
 
-    def _mala_adaptive_mass(self, packed_state, driver, params):
-        """One MALA step with diagonal adaptive mass; packed layout follows ``self.adaptive_mass``."""
+    def _mala_adaptive_mass_step(self, packed_state, driver, params):
+        """One MALA step with diagonal adaptive mass; returns ``(packed_state, accepted)``."""
         step_size = params["epsilon"]
         seed, t = driver
         mode = self.adaptive_mass
@@ -840,7 +872,7 @@ class ParallelMALA(ParallelHMC):
                 grad_var=grad_var,
             )
 
-        new_position, grad_new = self._mala_propose_accept(
+        new_position, grad_new, g = self._mala_propose_accept(
             position, mass_diag, seed, step_size
         )
 
@@ -859,7 +891,7 @@ class ParallelMALA(ParallelHMC):
                 lambda _: (count, mean_draw, m2_draw),
                 operand=None,
             )
-            return _pack_draw_only(new_position, mean_n, m2_n)
+            return _pack_draw_only(new_position, mean_n, m2_n), g
 
         _, mean_draw_n, m2_draw_n = jax.lax.cond(
             do_adapt,
@@ -889,16 +921,31 @@ class ParallelMALA(ParallelHMC):
         )
         return _pack_adaptive_state(
             new_position, mean_draw_n, m2_draw_n, mean_grad_n, m2_grad_n
+        ), g
+
+    def _mala_adaptive_mass(self, packed_state, driver, params):
+        packed, _ = self._mala_adaptive_mass_step(packed_state, driver, params)
+        return packed
+
+    def _mala_fixed_step(self, position, driver, params):
+        seed, _t = driver
+        step_size = params["epsilon"]
+        mass_diag = jnp.ones((self.D,), dtype=position.dtype)
+        new_position, _, g = self._mala_propose_accept(
+            position, mass_diag, seed, step_size
         )
+        return new_position, g
+
+    def _sequential_transition_with_accept(self, state, driver, params):
+        if self.adaptive_mass is not None:
+            return self._mala_adaptive_mass_step(state, driver, params)
+        return self._mala_fixed_step(state, driver, params)
 
     def mala_fn_for_deer(self, state, driver, params):
         """MALA transition used by DEER and the sequential scan (dispatches on ``adaptive_mass``)."""
         if self.adaptive_mass is not None:
             return self._mala_adaptive_mass(state, driver, params)
-        seed, _t = driver
-        step_size = params["epsilon"]
-        mass_diag = jnp.ones((self.D,), dtype=state.dtype)
-        new_position, _ = self._mala_propose_accept(state, mass_diag, seed, step_size)
+        new_position, _ = self._mala_fixed_step(state, driver, params)
         return new_position
 
     def hmc_fn_for_deer(self, state, driver, params):
@@ -909,6 +956,9 @@ class ParallelMALA(ParallelHMC):
 
     def run_sequential_mala_full(self, key, initial_state, params):
         return self.run_sequential_hmc_full(key, initial_state, params)
+
+    def run_sequential_mala_full_with_accepts(self, key, initial_state, params):
+        return self.run_sequential_hmc_full_with_accepts(key, initial_state, params)
 
     def run_parallel_mala(self, key, initial_state, init_trajectory_guess, params):
         return self.run_parallel_hmc(key, initial_state, init_trajectory_guess, params)
@@ -1551,10 +1601,14 @@ class ParallelNUTS:
 
     def nuts_fn_for_deer(self, position: jnp.ndarray, driver, params):
         """One NUTS transition: position -> next position."""
+        new_position, _ = self._nuts_transition_with_accept(position, driver, params)
+        return new_position
+
+    def _nuts_transition_with_accept(self, position: jnp.ndarray, driver, params):
         key, _t = driver
         step_size = params["step_size"]
         state = self._nuts_init(position, self.log_prob)
-        new_state, _info = self._nuts_kernel(
+        new_state, info = self._nuts_kernel(
             key,
             state,
             self.log_prob,
@@ -1562,7 +1616,8 @@ class ParallelNUTS:
             self.inverse_mass_matrix,
             self.max_num_doublings,
         )
-        return new_state.position
+        accepted = jnp.asarray(info.acceptance_rate, dtype=position.dtype)
+        return new_state.position, accepted
 
     def _run_sequential_packed(self, key, initial_state, params):
         def _fn_for_scan(state, driver):
@@ -1575,6 +1630,15 @@ class ParallelNUTS:
 
     def run_sequential_nuts(self, key, initial_state, params):
         return self._run_sequential_packed(key, initial_state, params)
+
+    def run_sequential_nuts_with_accepts(self, key, initial_state, params):
+        def _fn_for_scan(state, driver):
+            nxt, accepted = self._nuts_transition_with_accept(state, driver, params)
+            return nxt, (nxt, accepted)
+
+        drivers = (jr.split(key, (self.chain_length,)), jnp.arange(self.chain_length))
+        _, (out_states, accepts) = jax.lax.scan(_fn_for_scan, initial_state, drivers)
+        return out_states, accepts
 
     def run_parallel_nuts(self, key, initial_state, init_trajectory_guess, params):
         deer_params = params

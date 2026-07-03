@@ -1,7 +1,8 @@
 """Run parallel NUTS (BlackJAX No-U-Turn Sampler) with DEER.
 
 Each chain transition is one BlackJAX NUTS kernel step. Produces progress and
-Newton-error plots, a position-convergence GIF, and saved ``.npy`` arrays.
+Newton-error plots, a position-convergence GIF, Lyapunov diagnostics, and saved
+``.npy`` arrays.
 
 Run:
     uv run examples/run_nuts.py
@@ -17,6 +18,7 @@ import jax.numpy as jnp
 import jax.random as jr
 import numpy as np
 from src import samplers
+from src.util import lyapunov_exponent_sequential, save_lyapunov_results
 
 _EXAMPLES_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = _EXAMPLES_DIR.parent
@@ -27,8 +29,11 @@ import plot as hmc_plot
 from config import (
     SAMPLER_CONFIGS_DIR,
     add_run_config_args,
+    add_run_output_args,
     deer_kwargs,
+    finalize_run,
     load_run_configs,
+    resolve_run_dir,
     save_run_snapshot,
 )
 from targets import load_target
@@ -38,18 +43,9 @@ jax.config.update("jax_default_matmul_precision", "highest")
 
 DEFAULT_SAMPLER_CONFIG = SAMPLER_CONFIGS_DIR / "nuts.json"
 DEFAULT_TARGET = "banana"
-RUNS_PARENT = _REPO_ROOT / "experiments" / "nuts_runs"
+RUNS_PARENT = _REPO_ROOT / "experiments" / "nuts" / "individual_runs"
 
 _SHOW_DEER_PROGRESS = __name__ == "__main__"
-
-
-def _next_run_dir(runs_parent: Path) -> Path:
-    runs_parent.mkdir(parents=True, exist_ok=True)
-    max_n = 0
-    for p in runs_parent.iterdir():
-        if p.is_dir() and p.name.isdigit():
-            max_n = max(max_n, int(p.name))
-    return runs_parent / str(max_n + 1)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -59,6 +55,7 @@ def _parse_args() -> argparse.Namespace:
         sampler_config=DEFAULT_SAMPLER_CONFIG,
         target=DEFAULT_TARGET,
     )
+    add_run_output_args(parser, runs_parent=RUNS_PARENT)
     return parser.parse_args()
 
 
@@ -104,8 +101,12 @@ sampler = samplers.ParallelNUTS(
     max_num_doublings=params["max_num_doublings"],
 )
 
-run_sequential = jax.jit(sampler.run_sequential_nuts)
-states_seq = run_sequential(key, initial_state, params)
+run_sequential = jax.jit(sampler.run_sequential_nuts_with_accepts)
+states_seq, seq_accepts = run_sequential(key, initial_state, params)
+print(
+    "Sequential trajectory average NUTS acceptance rate: "
+    f"{float(jnp.mean(seq_accepts)):.4f}"
+)
 
 init_trajectory_guess = initial_state[None, :] * jnp.ones((chain_length, D))
 
@@ -131,8 +132,8 @@ states_par, iters = run_parallel(key, initial_state, init_trajectory_guess, para
 print(f"DEER converged in {int(iters)} / {max_iter} Newton iterations")
 
 if __name__ == "__main__":
-    run_dir = _next_run_dir(RUNS_PARENT)
-    run_dir.mkdir(parents=False)
+    run_dir = resolve_run_dir(args)
+    run_dir.mkdir(parents=True, exist_ok=True)
     save_run_snapshot(
         run_dir,
         sampler_path=sampler_path,
@@ -179,4 +180,31 @@ if __name__ == "__main__":
         max_newton_iter=int(iters),
     )
 
-    print(f"Saved config, plots, states_par.npy, states_seq.npy, and GIFs under {run_dir}")
+    if cfg.get("compute_lyapunov", True):
+        lyap_tangent_key = jr.PRNGKey(int(cfg.get("lyapunov_seed", cfg["random_seed"] + 1)))
+        tangent_subspace = cfg.get("lyapunov_tangent", "full")
+        lyap = lyapunov_exponent_sequential(
+            lambda s, d: sampler.nuts_fn_for_deer(s, d, params),
+            initial_state,
+            key,
+            chain_length,
+            lyap_tangent_key,
+            tangent_subspace=tangent_subspace,
+            position_dim=D if tangent_subspace == "position" else None,
+        )
+        save_lyapunov_results(run_dir, lyap)
+        hmc_plot.lyapunov_ftle_plot(
+            lyap["ftle"],
+            run_dir / "lyapunov_ftle.png",
+            lyapunov_exponent=lyap["lyapunov_exponent"],
+            title=f"FTLE, sequential NUTS ({target.name}, tangent={tangent_subspace})",
+        )
+        print(
+            f"Lyapunov exponent: {lyap['lyapunov_exponent']:.4f} "
+            f"(tail: {lyap['lyapunov_exponent_tail']:.4f}, tangent={tangent_subspace})"
+        )
+
+    finalize_run(
+        run_dir,
+        message=f"Saved config, plots, states_par.npy, states_seq.npy, GIFs, and Lyapunov outputs under {run_dir}",
+    )

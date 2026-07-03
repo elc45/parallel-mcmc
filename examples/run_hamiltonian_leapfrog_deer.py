@@ -28,6 +28,7 @@ from config import (
     SAMPLER_CONFIGS_DIR,
     add_run_config_args,
     deer_kwargs,
+    finalize_run,
     load_run_configs,
     save_run_snapshot,
 )
@@ -183,4 +184,7 @@ if __name__ == "__main__":
         max_newton_iter=int(iters),
     )
 
-    print(f"Saved config, plots, states_par.npy, states_seq.npy, and GIFs under {run_dir}")
+    finalize_run(
+        run_dir,
+        message=f"Saved config, plots, states_par.npy, states_seq.npy, and GIFs under {run_dir}",
+    )

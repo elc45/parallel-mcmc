@@ -7,6 +7,7 @@ plot, position/mass GIFs, and saved ``.npy`` arrays).
 Run:
     python examples/run_mala.py
     python examples/run_mala.py --target banana --sampler-config examples/configs/samplers/mala.json
+    python examples/run_mala.py --epsilon 0.05 --run-dir experiments/mala/scans/step_size/banana/epsilon_0.05
 """
 
 import argparse
@@ -36,8 +37,11 @@ import plot as hmc_plot
 from config import (
     SAMPLER_CONFIGS_DIR,
     add_run_config_args,
+    add_run_output_args,
     deer_kwargs,
+    finalize_run,
     load_run_configs,
+    resolve_run_dir,
     save_run_snapshot,
 )
 from targets import load_target
@@ -60,18 +64,9 @@ def _require_gpu() -> None:
 
 DEFAULT_SAMPLER_CONFIG = SAMPLER_CONFIGS_DIR / "mala.json"
 DEFAULT_TARGET = "gaussian_2d"
-RUNS_PARENT = _REPO_ROOT / "experiments" / "mala_runs"
+RUNS_PARENT = _REPO_ROOT / "experiments" / "mala" / "runs"
 
 _SHOW_DEER_PROGRESS = __name__ == "__main__"
-
-
-def _next_run_dir(runs_parent: Path) -> Path:
-    runs_parent.mkdir(parents=True, exist_ok=True)
-    max_n = 0
-    for p in runs_parent.iterdir():
-        if p.is_dir() and p.name.isdigit():
-            max_n = max(max_n, int(p.name))
-    return runs_parent / str(max_n + 1)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -81,11 +76,20 @@ def _parse_args() -> argparse.Namespace:
         sampler_config=DEFAULT_SAMPLER_CONFIG,
         target=DEFAULT_TARGET,
     )
+    add_run_output_args(parser, runs_parent=RUNS_PARENT)
+    parser.add_argument(
+        "--epsilon",
+        type=float,
+        default=None,
+        help="Override sampler config epsilon (MALA step size).",
+    )
     return parser.parse_args()
 
 
 args = _parse_args()
 cfg, deer_cfg, sampler_path, deer_path = load_run_configs(args)
+if args.epsilon is not None:
+    cfg["epsilon"] = args.epsilon
 deer = deer_kwargs(deer_cfg)
 
 target = load_target(args.target)
@@ -131,9 +135,13 @@ sampler = samplers.ParallelMALA(
     **welford_settings,
 )
 
-run_sequential = jax.jit(sampler.run_sequential_mala_full)
-states_seq_full = run_sequential(key, initial_state, params)
+run_sequential = jax.jit(sampler.run_sequential_mala_full_with_accepts)
+states_seq_full, seq_accepts = run_sequential(key, initial_state, params)
 states_seq = states_seq_full[..., :D]
+print(
+    "Sequential trajectory Metropolis acceptance rate: "
+    f"{float(jnp.mean(seq_accepts)):.4f}"
+)
 
 init_trajectory_guess = initial_state[None, :] * jnp.ones((chain_length, D))
 
@@ -174,13 +182,19 @@ print(f"DEER converged in {int(iters)} / {max_iter} Newton iterations")
 
 if __name__ == "__main__":
     _require_gpu()
-    run_dir = _next_run_dir(RUNS_PARENT)
-    run_dir.mkdir(parents=False)
+    run_dir = resolve_run_dir(args)
+    run_dir.mkdir(parents=True, exist_ok=True)
     save_run_snapshot(
         run_dir,
         sampler_path=sampler_path,
         deer_path=deer_path,
         target=args.target,
+        sampler_cfg=cfg if args.epsilon is not None else None,
+        latest_run_parent=(
+            args.latest_run_parent.resolve()
+            if args.latest_run_parent is not None
+            else None
+        ),
     )
 
     plot_progress = run_dir / "progress.png"
@@ -308,4 +322,7 @@ if __name__ == "__main__":
             f"(tail: {lyap['lyapunov_exponent_tail']:.4f}, tangent={tangent_subspace})"
         )
 
-    print(f"Saved config, plots, states_par.npy, states_seq.npy, and GIFs under {run_dir}")
+    finalize_run(
+        run_dir,
+        message=f"Saved config, plots, states_par.npy, states_seq.npy, and GIFs under {run_dir}",
+    )
