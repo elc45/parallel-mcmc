@@ -559,3 +559,27 @@ def lyapunov_ftle_plot(
     fig.tight_layout()
     fig.savefig(savepath, dpi=150, bbox_inches="tight")
     plt.close(fig)
+
+
+def newton_lyapunov_exponent_plot(
+    lyapunov_exponent_by_newton: np.ndarray,
+    savepath: Path | str,
+    *,
+    newton_iterations_start_at: int = 0,
+    title: str = "Lyapunov exponent vs Newton iteration",
+) -> None:
+    """Plot scalar Lyapunov exponent evaluated along each DEER Newton trajectory."""
+    values = np.asarray(lyapunov_exponent_by_newton)
+    iters = np.arange(values.shape[0], dtype=np.int32) + int(newton_iterations_start_at)
+    fig, ax = plt.subplots(figsize=(8, 4))
+    if values.shape[0] <= 200:
+        ax.plot(iters, values, lw=1.5, marker="o", ms=3)
+    else:
+        ax.plot(iters, values, lw=1.5)
+    ax.set_xlabel("Newton iteration", fontsize=12)
+    ax.set_ylabel("Lyapunov exponent", fontsize=12)
+    ax.set_title(title)
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(savepath, dpi=150, bbox_inches="tight")
+    plt.close(fig)

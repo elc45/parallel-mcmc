@@ -20,9 +20,11 @@ import jax.random as jr
 import numpy as np
 from src import samplers
 from src.util import (
+    lyapunov_exponent_by_newton,
     lyapunov_exponent_sequential,
     mass_diag_trajectory,
     save_lyapunov_results,
+    save_newton_lyapunov_results,
     unpack_adaptive_state_trajectory,
     welford_count_trajectory,
     welford_settings_from_config,
@@ -320,6 +322,29 @@ if __name__ == "__main__":
         print(
             f"Lyapunov exponent: {lyap['lyapunov_exponent']:.4f} "
             f"(tail: {lyap['lyapunov_exponent_tail']:.4f}, tangent={tangent_subspace})"
+        )
+
+        print("Computing Lyapunov exponent along each Newton trajectory...")
+        lyap_by_newton = lyapunov_exponent_by_newton(
+            lambda s, d: sampler.mala_fn_for_deer(s, d, params),
+            states_par_np,
+            y0_lyap,
+            key,
+            lyap_tangent_key,
+            tangent_subspace=tangent_subspace,
+            position_dim=D if tangent_subspace == "position" else None,
+        )
+        save_newton_lyapunov_results(
+            run_dir, lyap_by_newton, tangent_subspace=tangent_subspace
+        )
+        hmc_plot.newton_lyapunov_exponent_plot(
+            lyap_by_newton,
+            run_dir / "lyapunov_exponent_by_newton.png",
+            title=f"Lyapunov exponent vs Newton iter, MALA ({target.name}, tangent={tangent_subspace})",
+        )
+        print(
+            f"Newton Lyapunov exponent: initial={lyap_by_newton[0]:.4f}, "
+            f"final={lyap_by_newton[-1]:.4f}"
         )
 
     finalize_run(

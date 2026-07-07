@@ -23,7 +23,7 @@
 #SBATCH --job-name=deer_run
 #SBATCH --output=logs/deer_run_%j.out
 #SBATCH --error=logs/deer_run_%j.err
-#SBATCH --time=00:10:00
+#SBATCH --time=01:00:00
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=128G
@@ -44,15 +44,6 @@ echo "Python: $(command -v python)"
 python -V
 echo "uv: $(command -v uv)"
 uv -V
-
-# The login-node .venv can point at an unavailable Python (e.g. Nix store paths).
-# Recreate/sync the project environment on the compute node before running.
-if [[ ! -x "${REPO_ROOT}/.venv/bin/python" ]]; then
-  echo "Project .venv is missing or invalid; running uv sync..."
-else
-  echo "Syncing project environment with uv..."
-fi
-uv sync --frozen
 
 mkdir -p logs
 if [[ -n "${SLURM_JOB_ID:-}" ]]; then
