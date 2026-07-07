@@ -8,7 +8,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-STEP_SIZES="${STEP_SIZES:-0.01,0.02,0.05,0.005}"
+STEP_SIZES="${STEP_SIZES:-0.2,0.1,0.01,0.02,0.05,0.005}"
 IFS=',' read -r -a _SIZES <<< "${STEP_SIZES}"
 LAST_IDX=$(( ${#_SIZES[@]} - 1 ))
 

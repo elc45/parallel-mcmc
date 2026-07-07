@@ -85,6 +85,11 @@ params = {
     "max_num_doublings": int(cfg.get("max_num_doublings", 10)),
 }
 
+if "inverse_mass_matrix" in cfg:
+    inverse_mass_matrix = jnp.asarray(cfg["inverse_mass_matrix"], dtype=jnp.float64)
+else:
+    inverse_mass_matrix = 1.0
+
 sampler = samplers.ParallelNUTS(
     target_log_prob,
     D,
@@ -99,6 +104,7 @@ sampler = samplers.ParallelNUTS(
     qmem_efficient=qmem_efficient,
     clip_val=clip_val,
     max_num_doublings=params["max_num_doublings"],
+    inverse_mass_matrix=inverse_mass_matrix,
 )
 
 run_sequential = jax.jit(sampler.run_sequential_nuts_with_accepts)
@@ -124,6 +130,7 @@ sampler = samplers.ParallelNUTS(
     qmem_efficient=qmem_efficient,
     clip_val=clip_val,
     max_num_doublings=params["max_num_doublings"],
+    inverse_mass_matrix=inverse_mass_matrix,
 )
 
 print("Running parallel NUTS with full trace for visualization")

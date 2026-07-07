@@ -1,7 +1,13 @@
 from typing import Callable
 
 from .blr_german_credit import blr_german_credit
-from .gaussian import gaussian_2d, gaussian_10d, gaussian_100d
+from .gaussian import (
+    gaussian_2d,
+    gaussian_10d,
+    gaussian_100d,
+    toeplitz_gaussian_10d,
+    toeplitz_gaussian_100d,
+)
 from .gym import banana, ill_conditioned_gaussian
 from .spec import TargetSpec
 
@@ -14,6 +20,8 @@ TARGETS: dict[str, TargetFactory] = {
     "gaussian_2d": gaussian_2d,
     "gaussian_10d": gaussian_10d,
     "gaussian_100d": gaussian_100d,
+    "toeplitz_gaussian_10d": toeplitz_gaussian_10d,
+    "toeplitz_gaussian_100d": toeplitz_gaussian_100d,
 }
 
 

@@ -2,7 +2,7 @@
   "damp_factor": 1.0,
   "tol": 1e-5,
   "rtol": 1e-5,
-  "quasi": false,
+  "quasi": true,
   "qmem_efficient": false,
   "clip_val": 1e8
 }

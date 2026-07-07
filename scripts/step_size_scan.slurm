@@ -7,18 +7,6 @@
 #   sbatch scripts/step_size_scan.slurm banana
 #   sbatch scripts/step_size_scan.slurm banana examples/configs/samplers/mala.json
 #
-# Override step sizes (comma-separated, no spaces):
-#   STEP_SIZES=0.01,0.02,0.05 sbatch scripts/step_size_scan.slurm
-#
-# Override branch:
-#   GIT_BRANCH=microcanonical sbatch scripts/step_size_scan.slurm
-#
-# Outputs land under:
-#   experiments/mala/scans/step_size/<target>/epsilon_<value>/
-# Scan metadata: experiments/mala/scans/step_size/scan.json
-#
-# Check status:  squeue -u "$USER"
-# Cancel:         scancel <job_id>
 
 #SBATCH -p gpu
 #SBATCH --job-name=mala_step_scan
@@ -38,13 +26,6 @@ module load python uv
 
 REPO_ROOT="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 cd "${REPO_ROOT}"
-
-BRANCH="${GIT_BRANCH:-microcanonical}"
-if ! git checkout "${BRANCH}" 2>/dev/null; then
-  git fetch origin "${BRANCH}"
-  git checkout "${BRANCH}"
-fi
-echo "On branch $(git rev-parse --abbrev-ref HEAD) @ $(git rev-parse --short HEAD)"
 
 export PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 
@@ -76,7 +57,7 @@ if (( TASK_ID < 0 || TASK_ID >= ${#STEP_SIZES[@]} )); then
 fi
 EPSILON="${STEP_SIZES[$TASK_ID]}"
 
-SCAN_ROOT="${REPO_ROOT}/experiments/mala/scans/step_size"
+SCAN_ROOT="${REPO_ROOT}/experiments/mala/scans/step_size/discounted_welford"
 TARGET_SCAN_DIR="${SCAN_ROOT}/${TARGET}"
 RUN_LABEL="epsilon_${EPSILON}"
 RUN_DIR="${TARGET_SCAN_DIR}/${RUN_LABEL}"
@@ -97,6 +78,7 @@ step_sizes = [float(x) for x in sys.argv[6].split()]
 
 meta = {
     "scan": "step_size",
+    "welford_method": "discounted",
     "sampler_parameter": "epsilon",
     "step_sizes": step_sizes,
     "target": target,

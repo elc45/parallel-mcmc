@@ -1,5 +1,5 @@
 {
-  "damp_factor": 1.0,
+  "damp_factor": 0.5,
   "tol": 1e-5,
   "rtol": 1e-5,
   "quasi": false,

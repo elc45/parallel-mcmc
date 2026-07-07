@@ -63,12 +63,30 @@ def add_run_config_args(
     )
 
 
+def load_sampler_config(path: Path) -> dict[str, Any]:
+    """Load a sampler config file or the ``sampler`` section of ``run_config.json``."""
+    data = load_json(path)
+    sampler = data.get("sampler")
+    if isinstance(sampler, dict):
+        return sampler
+    return data
+
+
+def load_deer_config(path: Path) -> dict[str, Any]:
+    """Load a DEER config file or the ``deer`` section of ``run_config.json``."""
+    data = load_json(path)
+    deer = data.get("deer")
+    if isinstance(deer, dict):
+        return deer
+    return data
+
+
 def load_run_configs(
     args: argparse.Namespace,
 ) -> tuple[dict[str, Any], dict[str, Any], Path, Path]:
     sampler_path = args.sampler_config.resolve()
     deer_path = args.deer_config.resolve()
-    return load_json(sampler_path), load_json(deer_path), sampler_path, deer_path
+    return load_sampler_config(sampler_path), load_deer_config(deer_path), sampler_path, deer_path
 
 
 def next_run_dir(runs_parent: Path) -> Path:
@@ -111,6 +129,32 @@ def resolve_run_dir(args: argparse.Namespace) -> Path:
     return next_run_dir(args.runs_parent.resolve())
 
 
+def save_merged_run_config(
+    run_dir: Path,
+    *,
+    target: str,
+    sampler_cfg: dict[str, Any],
+    deer_cfg: dict[str, Any] | None = None,
+    sampler_path: Path | None = None,
+    deer_path: Path | None = None,
+    extra: dict[str, Any] | None = None,
+) -> None:
+    """Write a single JSON snapshot combining run metadata and config sections."""
+    merged: dict[str, Any] = {"target": target}
+    if sampler_path is not None:
+        merged["sampler_config_source"] = str(sampler_path)
+    if deer_path is not None:
+        merged["deer_config_source"] = str(deer_path)
+    if extra:
+        merged.update(extra)
+    merged["sampler"] = sampler_cfg
+    if deer_cfg is not None:
+        merged["deer"] = deer_cfg
+    with open(run_dir / "run_config.json", "w") as f:
+        json.dump(merged, f, indent=2)
+        f.write("\n")
+
+
 def save_run_snapshot(
     run_dir: Path,
     *,
@@ -121,19 +165,16 @@ def save_run_snapshot(
     latest_run_parent: Path | None = None,
 ) -> None:
     if sampler_cfg is None:
-        shutil.copy2(sampler_path, run_dir / "sampler_config.json")
-    else:
-        with open(run_dir / "sampler_config.json", "w") as f:
-            json.dump(sampler_cfg, f, indent=2)
-            f.write("\n")
-    shutil.copy2(deer_path, run_dir / "deer_config.json")
-    with open(run_dir / "run.json", "w") as f:
-        json.dump(
-            {"target": target, "sampler_config_source": str(sampler_path)},
-            f,
-            indent=2,
-        )
-        f.write("\n")
+        sampler_cfg = load_sampler_config(sampler_path)
+    deer_cfg = load_deer_config(deer_path)
+    save_merged_run_config(
+        run_dir,
+        target=target,
+        sampler_cfg=sampler_cfg,
+        deer_cfg=deer_cfg,
+        sampler_path=sampler_path,
+        deer_path=deer_path,
+    )
     latest_parent = latest_run_parent or run_dir.parent
     (latest_parent / "latest_run.txt").write_text(str(run_dir.resolve()) + "\n")
 

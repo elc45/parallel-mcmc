@@ -1,8 +1,8 @@
 {
-  "chain_length": 1000,
+  "chain_length": 200,
   "random_seed": 123,
   "initial_state_scale": 2.0,
-  "step_size": 1.0,
+  "step_size": 0.1,
   "max_num_doublings": 5,
   "compute_lyapunov": true
 }

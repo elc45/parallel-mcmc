@@ -1,0 +1,10 @@
+{
+  "warmup_steps": 1000,
+  "random_seed": 123,
+  "initial_state_scale": 2.0,
+  "initial_step_size": 1.0,
+  "target_acceptance_rate": 0.8,
+  "max_num_doublings": 10,
+  "is_mass_matrix_diagonal": true,
+  "progress_bar": false
+}
