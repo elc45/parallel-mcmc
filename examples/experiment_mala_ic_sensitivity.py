@@ -277,6 +277,12 @@ def _run_one_case(
     pos_pert = _positions(traj_pert, D)
     welford_method = sampler.welford_method
     welford_n_init = sampler.welford_n_init
+    initial_mass_ref = np.asarray(
+        jax.device_get(sampler._initial_mass_diag(jnp.asarray(packed_ref[..., :D])))
+    )
+    initial_mass_pert = np.asarray(
+        jax.device_get(sampler._initial_mass_diag(jnp.asarray(packed_pert[..., :D])))
+    )
     mass_ref = mass_diag_trajectory(
         traj_ref,
         D,
@@ -284,6 +290,7 @@ def _run_one_case(
         params["mass_adapt_steps"],
         welford_method=welford_method,
         welford_n_init=welford_n_init,
+        initial_mass=initial_mass_ref,
     )
     mass_pert = mass_diag_trajectory(
         traj_pert,
@@ -292,6 +299,7 @@ def _run_one_case(
         params["mass_adapt_steps"],
         welford_method=welford_method,
         welford_n_init=welford_n_init,
+        initial_mass=initial_mass_pert,
     )
     return {
         "packed_pert": np.asarray(packed_pert),

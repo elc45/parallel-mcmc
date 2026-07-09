@@ -231,27 +231,58 @@ _MASS_LOWER: float = 1e-20
 _MASS_UPPER: float = 1e20
 
 
+def _regularized_position_variance(
+    count: jnp.ndarray,
+    draw_var: jnp.ndarray,
+) -> jnp.ndarray:
+    """Shrinkage-regularized position variance (Stan / BlackJAX window adaptation)."""
+    count_f = jnp.asarray(count, dtype=draw_var.dtype)
+    scaled = (count_f / (count_f + 5.0)) * draw_var
+    shrinkage = 1e-3 * (5.0 / (count_f + 5.0))
+    return scaled + shrinkage
+
+
+def _initial_mass_diag_from_score(
+    score: jnp.ndarray,
+    *,
+    fill_invalid: float = 1.0,
+    clamp: tuple[float, float] = (_MASS_LOWER, _MASS_UPPER),
+) -> jnp.ndarray:
+    """Diagonal mass for the first adaptive step: ``M_ii = |score_i|``."""
+    val = jnp.abs(score)
+    return jnp.where(
+        jnp.isfinite(val) & (val > 0.0),
+        jnp.clip(val, clamp[0], clamp[1]),
+        fill_invalid,
+    )
+
+
 def _adaptive_mass_diag(
     mode: Literal["draw-only", "grad"],
     draw_var: jnp.ndarray,
     grad_var: jnp.ndarray | None = None,
+    *,
+    count: jnp.ndarray | None = None,
     fill_invalid: float = 1.0,
     clamp: tuple[float, float] = (_MASS_LOWER, _MASS_UPPER),
 ) -> jnp.ndarray:
-    """Diagonal mass from Welford variances.
+    """Diagonal mass from Welford variances (Stan / BlackJAX convention).
 
-    draw-only: mass = draw_var
-    grad:      mass = sqrt(draw_var / grad_var)
+    Welford draw variance estimates position covariance Σ; mass M ≈ Σ^{-1}.
+    When ``count`` is given, Σ is regularized as in BlackJAX window adaptation
+    before inversion. draw-only: M_ii = 1 / Σ_ii; grad: M_ii = sqrt(var_grad / Σ_ii).
 
-    Non-finite or zero entries are replaced with fill_invalid (default 1.0),
+    Non-finite or non-positive entries are replaced with fill_invalid (default 1.0),
     then the result is clamped to [clamp[0], clamp[1]].
     """
+    if count is not None:
+        draw_var = _regularized_position_variance(count, draw_var)
     if mode == "draw-only":
-        val = draw_var
+        val = 1.0 / draw_var
     else:
         if grad_var is None:
             raise ValueError("grad_var is required when mode is 'grad'")
-        val = _sqrt_nonneg(draw_var / grad_var)
+        val = _sqrt_nonneg(grad_var / draw_var)
     mass = jnp.where(
         jnp.isfinite(val) & (val > 0.0),
         jnp.clip(val, clamp[0], clamp[1]),
@@ -338,10 +369,11 @@ class ParallelHMC:
             rtol               - relative residual tolerance for DEER early stopping
                                  (None = dtype default in deer.seq1d).
             adaptive_mass      - None: fixed identity mass (default). ``\"draw-only\"``: Welford
-                                 variance of draws only; M_ii = var_draw_i, clamped to [1e-20, 1e20];
-                                 packed dim 3D. ``\"grad\"``: Welford variances of draws and scores;
-                                 M_ii = sqrt(var_draw/var_grad), clamped to [1e-20, 1e20]; packed dim
-                                 5D. Non-finite or zero entries fall back to 1.0 (unit mass). For
+                                 variance of draws only; M_ii = 1/var_draw_i (Stan/BlackJAX
+                                 convention, M ≈ Σ^{-1}), clamped to [1e-20, 1e20]; packed dim 3D.
+                                 ``\"grad\"``: Welford variances of draws and scores;
+                                 M_ii = sqrt(var_grad/var_draw), clamped to [1e-20, 1e20]; packed dim
+                                 5D. Non-finite or non-positive entries fall back to 1.0 (unit mass). For
                                  backward compatibility, ``True`` is treated as ``\"grad\"`` and
                                  ``False`` as None. The Welford sample count is *not* stored in the
                                  packed state; it is reconstructed from the chain index as
@@ -353,11 +385,10 @@ class ParallelHMC:
                                  ``\"grad_mean\"``/``\"grad_m2\"`` (default to the ``\"mean\"``/``\"m2\"``
                                  specs). Each value is either a number (constant fill) or one of the
                                  strings ``\"zeros\"``, ``\"ones\"``, ``\"ramp\"`` (``1..T``),
-                                 ``\"positions\"`` (the trajectory guess itself; means only), or
-                                 ``\"grad_outer\"`` (``grad(x) grad(x)^T`` diagonal at each
-                                 trajectory position; M2/s slots only). Missing keys / ``None`` use
-                                 defaults: means = ``zeros``, M2/s = ``grad_outer`` at the
-                                 initial trajectory positions.
+                                 ``\"positions\"`` (the trajectory guess itself; means only).
+                                 Missing keys / ``None`` use defaults: means = ``zeros``,
+                                 M2/s = ``zeros``. The first sampler step uses mass
+                                 ``diag(|score(x_0)|)`` at the initial position (not Welford).
                                  Optional ``\"n_init\"`` sets the discounted-Welford offset when
                                  ``welford_method`` is ``\"discounted\"`` (overridden by
                                  constructor ``welford_n_init``).
@@ -418,20 +449,52 @@ class ParallelHMC:
         D = self.D
         dtype = position.dtype
         z = jnp.zeros((D,), dtype=dtype)
-        m2 = self._m2_from_grad_outer(position)
+        m2 = jnp.zeros((D,), dtype=dtype)
         if self.adaptive_mass == "draw-only":
             return _pack_draw_only(position, z, m2)
         return _pack_adaptive_state(position, z, m2, z, m2)
 
-    def _m2_from_grad_outer(self, positions: jnp.ndarray) -> jnp.ndarray:
-        """Diagonal of ``grad(x) grad(x)^T`` at each row of ``positions``."""
+    def _initial_mass_diag(self, position: jnp.ndarray) -> jnp.ndarray:
+        """Mass for the first adaptive draw: ``diag(|score(x)|)`` at ``position``."""
+        _, score = self.target_log_prob_and_grad(position)
+        return _initial_mass_diag_from_score(score)
 
-        def grad_at(p: jnp.ndarray) -> jnp.ndarray:
-            return self.target_log_prob_and_grad(p)[1]
+    def _adaptive_mass_diag_at_step(
+        self,
+        position: jnp.ndarray,
+        count: jnp.ndarray,
+        *,
+        mode: Literal["draw-only", "grad"],
+        m2_draw: jnp.ndarray,
+        m2_grad: jnp.ndarray | None = None,
+    ) -> jnp.ndarray:
+        """Mass for one adaptive step; first draw uses ``diag(|score|)``."""
+        welford_method = self.welford_method
+        welford_n_init = jnp.asarray(self.welford_n_init, dtype=position.dtype)
 
-        if positions.ndim == 1:
-            return jnp.square(grad_at(positions))
-        return jnp.square(jax.vmap(grad_at)(positions))
+        def _from_welford(_):
+            draw_var = _variance_diag_from_accumulator(
+                welford_method, count, m2_draw, n_init=welford_n_init
+            )
+            if mode == "draw-only":
+                return _adaptive_mass_diag("draw-only", draw_var, count=count)
+            assert m2_grad is not None
+            grad_var = _variance_diag_from_accumulator(
+                welford_method, count, m2_grad, n_init=welford_n_init
+            )
+            return _adaptive_mass_diag(
+                "grad",
+                draw_var,
+                grad_var=grad_var,
+                count=count,
+            )
+
+        return jax.lax.cond(
+            count < 1.0,
+            lambda _: self._initial_mass_diag(position),
+            _from_welford,
+            operand=None,
+        )
 
     def _resolve_welford_init(
         self,
@@ -441,13 +504,12 @@ class ParallelHMC:
         shape: tuple[int, ...],
         dtype,
         positions: jnp.ndarray | None = None,
-        grad_outer_default: jnp.ndarray | None = None,
     ) -> jnp.ndarray:
         """Interpret a single ``welford_init`` spec into an array of ``shape``.
 
         ``None`` -> ``default``. Numbers -> constant fill. Strings:
         ``\"zeros\"``, ``\"ones\"``, ``\"ramp\"`` (``1..T`` along axis 0), ``\"positions\"``
-        (broadcast ``positions``; means only), ``\"grad_outer\"`` (M2/s slots).
+        (broadcast ``positions``; means only).
         """
         if spec is None:
             return default
@@ -465,37 +527,29 @@ class ParallelHMC:
                 if positions is None:
                     raise ValueError("welford_init 'positions' is only valid for mean slots")
                 return jnp.broadcast_to(positions, shape).astype(dtype)
-            if key in ("grad_outer", "grad-outer", "gradouter"):
-                if grad_outer_default is None:
-                    raise ValueError("welford_init 'grad_outer' is only valid for M2/s slots")
-                return grad_outer_default
             raise ValueError(
                 f"Unknown welford_init spec {spec!r}; expected a number or one of "
-                "'zeros', 'ones', 'ramp', 'positions', 'grad_outer'"
+                "'zeros', 'ones', 'ramp', 'positions'"
             )
         return jnp.full(shape, float(spec), dtype=dtype)
 
     def _pack_init_trajectory_guess(self, y_positions: jnp.ndarray) -> jnp.ndarray:
         """Expand an initial (T, D) trajectory guess to (T, chain_state_dim) with Welford slots.
 
-        Defaults: means = zeros, M2/s = diagonal of ``grad(x) grad(x)^T`` at each position row.
+        Defaults: means = zeros, M2/s = zeros. The first chain step uses mass
+        ``diag(|score(x_0)|)`` at the initial position.
         """
         T, D = y_positions.shape
         dtype = y_positions.dtype
         init = self.welford_init
 
         zeros = jnp.zeros((T, D), dtype=dtype)
-        default_m2 = self._m2_from_grad_outer(y_positions)
         if self.adaptive_mass == "draw-only":
             means = self._resolve_welford_init(
                 init.get("mean"), zeros, shape=(T, D), dtype=dtype, positions=y_positions
             )
             m2s = self._resolve_welford_init(
-                init.get("m2"),
-                default_m2,
-                shape=(T, D),
-                dtype=dtype,
-                grad_outer_default=default_m2,
+                init.get("m2"), zeros, shape=(T, D), dtype=dtype
             )
             return jnp.concatenate([y_positions, means, m2s], axis=-1)
 
@@ -503,11 +557,7 @@ class ParallelHMC:
             init.get("mean"), zeros, shape=(T, D), dtype=dtype, positions=y_positions
         )
         draw_m2s = self._resolve_welford_init(
-            init.get("m2"),
-            default_m2,
-            shape=(T, D),
-            dtype=dtype,
-            grad_outer_default=default_m2,
+            init.get("m2"), zeros, shape=(T, D), dtype=dtype
         )
         grad_means = self._resolve_welford_init(
             init.get("grad_mean", init.get("mean")),
@@ -518,10 +568,9 @@ class ParallelHMC:
         )
         grad_m2s = self._resolve_welford_init(
             init.get("grad_m2", init.get("m2")),
-            default_m2,
+            zeros,
             shape=(T, D),
             dtype=dtype,
-            grad_outer_default=default_m2,
         )
         return jnp.concatenate(
             [y_positions, draw_means, draw_m2s, grad_means, grad_m2s], axis=-1
@@ -562,19 +611,17 @@ class ParallelHMC:
         welford_method = self.welford_method
         welford_n_init = jnp.asarray(self.welford_n_init, dtype=position.dtype)
 
-        draw_var = _variance_diag_from_accumulator(
-            welford_method, count, m2_draw, n_init=welford_n_init
-        )
         if mode == "draw-only":
-            mass_diag = _adaptive_mass_diag("draw-only", draw_var)
-        else:
-            grad_var = _variance_diag_from_accumulator(
-                welford_method, count, m2_grad, n_init=welford_n_init
+            mass_diag = self._adaptive_mass_diag_at_step(
+                position, count, mode="draw-only", m2_draw=m2_draw
             )
-            mass_diag = _adaptive_mass_diag(
-                "grad",
-                draw_var,
-                grad_var=grad_var,
+        else:
+            mass_diag = self._adaptive_mass_diag_at_step(
+                position,
+                count,
+                mode="grad",
+                m2_draw=m2_draw,
+                m2_grad=m2_grad,
             )
 
         momentum_seed, mh_seed = jr.split(seed)
@@ -857,19 +904,17 @@ class ParallelMALA(ParallelHMC):
         welford_method = self.welford_method
         welford_n_init = jnp.asarray(self.welford_n_init, dtype=position.dtype)
 
-        draw_var = _variance_diag_from_accumulator(
-            welford_method, count, m2_draw, n_init=welford_n_init
-        )
         if mode == "draw-only":
-            mass_diag = _adaptive_mass_diag("draw-only", draw_var)
-        else:
-            grad_var = _variance_diag_from_accumulator(
-                welford_method, count, m2_grad, n_init=welford_n_init
+            mass_diag = self._adaptive_mass_diag_at_step(
+                position, count, mode="draw-only", m2_draw=m2_draw
             )
-            mass_diag = _adaptive_mass_diag(
-                "grad",
-                draw_var,
-                grad_var=grad_var,
+        else:
+            mass_diag = self._adaptive_mass_diag_at_step(
+                position,
+                count,
+                mode="grad",
+                m2_draw=m2_draw,
+                m2_grad=m2_grad,
             )
 
         new_position, grad_new, g = self._mala_propose_accept(

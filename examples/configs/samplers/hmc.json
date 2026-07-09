@@ -1,10 +1,10 @@
 {
-  "chain_length": 500,
+  "chain_length": 1000,
   "random_seed": 123,
-  "initial_state_scale": 10.0,
-  "adaptive_mass": "draw-only",
+  "initial_state_scale": 1000.0,
+  "adaptive_mass": null,
   "welford_method": "standard",
-  "epsilon": 0.5,
+  "epsilon": 0.1,
   "num_leapfrog_steps": 8,
   "mass_adapt_steps": 100,
   "compute_lyapunov": true

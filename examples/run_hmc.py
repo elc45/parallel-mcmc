@@ -197,6 +197,9 @@ if __name__ == "__main__":
     welford_method = sampler.welford_method
     welford_n_init = sampler.welford_n_init
     if adaptive_mass_mode is not None:
+        initial_mass = np.asarray(
+            jax.device_get(sampler._initial_mass_diag(initial_state))
+        )
         mass_par = mass_diag_trajectory(
             states_par_np,
             D,
@@ -204,6 +207,7 @@ if __name__ == "__main__":
             mass_adapt_steps,
             welford_method=welford_method,
             welford_n_init=welford_n_init,
+            initial_mass=initial_mass,
         )
         mass_seq = mass_diag_trajectory(
             states_seq_full_np,
@@ -212,6 +216,7 @@ if __name__ == "__main__":
             mass_adapt_steps,
             welford_method=welford_method,
             welford_n_init=welford_n_init,
+            initial_mass=initial_mass,
         )
         np.save(run_dir / "mass_matrix_seq.npy", mass_seq)
         np.save(run_dir / "mass_matrix_par.npy", mass_par)

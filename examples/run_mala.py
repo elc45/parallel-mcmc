@@ -51,19 +51,6 @@ from targets import load_target
 jax.config.update("jax_enable_x64", True)
 jax.config.update("jax_default_matmul_precision", "highest")
 
-def _require_gpu() -> None:
-    backend = jax.default_backend()
-    if backend != "gpu":
-        raise RuntimeError(
-            f"JAX is using backend '{backend}', but a GPU is required. "
-            "Install a CUDA-enabled jaxlib and run on a machine with a visible GPU."
-        )
-    gpu_devices = jax.devices("gpu")
-    if not gpu_devices:
-        raise RuntimeError("No GPU devices found.")
-    print(f"JAX GPU backend: {gpu_devices[0]}")
-
-
 DEFAULT_SAMPLER_CONFIG = SAMPLER_CONFIGS_DIR / "mala.json"
 DEFAULT_TARGET = "gaussian_2d"
 RUNS_PARENT = _REPO_ROOT / "experiments" / "mala" / "runs"
@@ -183,7 +170,6 @@ states_par, iters = run_parallel(key, initial_state, init_trajectory_guess, para
 print(f"DEER converged in {int(iters)} / {max_iter} Newton iterations")
 
 if __name__ == "__main__":
-    _require_gpu()
     run_dir = resolve_run_dir(args)
     run_dir.mkdir(parents=True, exist_ok=True)
     save_run_snapshot(
@@ -243,6 +229,9 @@ if __name__ == "__main__":
     welford_method = sampler.welford_method
     welford_n_init = sampler.welford_n_init
     if adaptive_mass_mode is not None:
+        initial_mass = np.asarray(
+            jax.device_get(sampler._initial_mass_diag(initial_state))
+        )
         mass_par = mass_diag_trajectory(
             states_par_np,
             D,
@@ -250,6 +239,7 @@ if __name__ == "__main__":
             mass_adapt_steps,
             welford_method=welford_method,
             welford_n_init=welford_n_init,
+            initial_mass=initial_mass,
         )
         mass_seq = mass_diag_trajectory(
             states_seq_full_np,
@@ -258,6 +248,7 @@ if __name__ == "__main__":
             mass_adapt_steps,
             welford_method=welford_method,
             welford_n_init=welford_n_init,
+            initial_mass=initial_mass,
         )
         np.save(run_dir / "mass_matrix_seq.npy", mass_seq)
         np.save(run_dir / "mass_matrix_par.npy", mass_par)

@@ -98,6 +98,18 @@ _MASS_LOWER: float = 1e-20
 _MASS_UPPER: float = 1e20
 
 
+def _regularized_position_variance_np(
+    count: np.ndarray,
+    draw_var: np.ndarray,
+) -> np.ndarray:
+    """NumPy mirror of ``samplers._regularized_position_variance``."""
+    count = np.asarray(count)[..., None]
+    draw_var = np.asarray(draw_var)
+    scaled = (count / (count + 5.0)) * draw_var
+    shrinkage = 1e-3 * (5.0 / (count + 5.0))
+    return scaled + shrinkage
+
+
 def _variance_diag_from_welford_np(count: np.ndarray, m2_diag: np.ndarray) -> np.ndarray:
     """NumPy mirror of ``samplers._variance_diag_from_welford`` over a trajectory.
 
@@ -160,6 +172,53 @@ def _variance_diag_from_accumulator_np(
     return _variance_diag_from_welford_np(count, m2_diag)
 
 
+def _initial_mass_diag_from_score_np(
+    score: np.ndarray,
+    *,
+    fill_invalid: float = 1.0,
+    clamp: tuple[float, float] = (_MASS_LOWER, _MASS_UPPER),
+) -> np.ndarray:
+    """NumPy mirror of ``samplers._initial_mass_diag_from_score``."""
+    val = np.abs(np.asarray(score))
+    return np.where(
+        np.isfinite(val) & (val > 0.0),
+        np.clip(val, clamp[0], clamp[1]),
+        fill_invalid,
+    )
+
+
+def _mass_diag_from_accumulators_np(
+    mode: Literal["grad", "draw-only"],
+    count: float,
+    m2_draw: np.ndarray,
+    m2_grad: np.ndarray | None,
+    *,
+    welford_method: Literal["standard", "discounted"] = "standard",
+    welford_n_init: float = 0.0,
+    clamp: tuple[float, float] = (_MASS_LOWER, _MASS_UPPER),
+    fill_invalid: float = 1.0,
+) -> np.ndarray:
+    draw_var = _variance_diag_from_accumulator_np(
+        welford_method, np.asarray(count), m2_draw, n_init=welford_n_init
+    )
+    reg_var = _regularized_position_variance_np(np.asarray(count), draw_var)
+    if mode == "draw-only":
+        with np.errstate(divide="ignore", invalid="ignore"):
+            val = 1.0 / reg_var
+    else:
+        assert m2_grad is not None
+        grad_var = _variance_diag_from_accumulator_np(
+            welford_method, np.asarray(count), m2_grad, n_init=welford_n_init
+        )
+        with np.errstate(divide="ignore", invalid="ignore"):
+            val = np.sqrt(np.maximum(grad_var / reg_var, 0.0))
+    return np.where(
+        np.isfinite(val) & (val > 0.0),
+        np.clip(val, clamp[0], clamp[1]),
+        fill_invalid,
+    )
+
+
 def mass_diag_trajectory(
     packed: np.ndarray,
     D: int,
@@ -170,10 +229,19 @@ def mass_diag_trajectory(
     *,
     welford_method: Literal["standard", "discounted"] = "standard",
     welford_n_init: float = 0.0,
+    initial_mass: np.ndarray | None = None,
 ) -> np.ndarray:
     """Reconstruct the diagonal mass matrix from packed adaptive states.
 
-    NumPy mirror of ``samplers._adaptive_mass_diag`` applied across a whole trajectory.
+    NumPy mirror of the per-step mass used in :class:`~src.samplers.ParallelHMC`
+    adaptive transitions. Step ``i`` uses Welford accumulators from the state
+    before that step (``initial_mass`` at ``i == 0`` when provided).
+
+    Parameters
+    ----------
+    initial_mass:
+        Mass used for the first step, typically ``diag(|score(x_0)|)``. When
+        ``None``, non-Welford steps fall back to ``fill_invalid``.
 
     Parameters
     ----------
@@ -184,8 +252,8 @@ def mass_diag_trajectory(
     D:
         Dimensionality of the position space.
     mode:
-        Adaptive mass mode, ``"draw-only"`` (mass = draw variance) or ``"grad"``
-        (mass = ``sqrt(var_draw / var_grad)``).
+        Adaptive mass mode, ``"draw-only"`` (M_ii = 1 / var_draw_i) or ``"grad"``
+        (M_ii = ``sqrt(var_grad / var_draw)``); Stan/BlackJAX convention M ≈ Σ^{-1}.
     mass_adapt_steps:
         Number of leading steps over which the mass matrix is adapted; used to reconstruct
         the (no-longer-stored) Welford sample count via :func:`welford_count_trajectory`.
@@ -205,28 +273,41 @@ def mass_diag_trajectory(
     """
     packed = np.asarray(packed)
     chain_length = packed.shape[-2]
-    count = welford_count_trajectory(chain_length, mass_adapt_steps)  # (chain_length,)
+    step_idx = np.arange(chain_length)
+    count_pre = np.minimum(step_idx, mass_adapt_steps).astype(float)
     unpacked = unpack_adaptive_state_trajectory(packed, D, mode)
     if mode == "draw-only":
         _position, _mean, m2_draw = unpacked
-        val = _variance_diag_from_accumulator_np(
-            welford_method, count, m2_draw, n_init=welford_n_init
-        )
+        m2_grad = None
     else:
         _position, _mean_draw, m2_draw, _mean_grad, m2_grad = unpacked
-        draw_var = _variance_diag_from_accumulator_np(
-            welford_method, count, m2_draw, n_init=welford_n_init
+
+    lead_shape = packed.shape[:-2]
+    mass = np.empty(lead_shape + (chain_length, D), dtype=float)
+    for i in range(chain_length):
+        if count_pre[i] < 1.0:
+            mass[..., i, :] = (
+                np.asarray(initial_mass, dtype=float)
+                if initial_mass is not None
+                else fill_invalid
+            )
+            continue
+        m2_step = np.zeros((D,), dtype=float) if i == 0 else m2_draw[..., i - 1, :]
+        m2g_step = (
+            None
+            if m2_grad is None
+            else (np.zeros((D,), dtype=float) if i == 0 else m2_grad[..., i - 1, :])
         )
-        grad_var = _variance_diag_from_accumulator_np(
-            welford_method, count, m2_grad, n_init=welford_n_init
+        mass[..., i, :] = _mass_diag_from_accumulators_np(
+            mode,
+            float(count_pre[i]),
+            m2_step,
+            m2g_step,
+            welford_method=welford_method,
+            welford_n_init=welford_n_init,
+            clamp=clamp,
+            fill_invalid=fill_invalid,
         )
-        with np.errstate(divide="ignore", invalid="ignore"):
-            val = np.sqrt(np.maximum(draw_var / grad_var, 0.0))
-    mass = np.where(
-        np.isfinite(val) & (val > 0.0),
-        np.clip(val, clamp[0], clamp[1]),
-        fill_invalid,
-    )
     return mass
 
 

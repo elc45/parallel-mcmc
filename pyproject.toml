@@ -13,10 +13,12 @@ dependencies = [
   # Pinned stack: TensorFlow 2.16 + JAX 0.4.x + TFP (JAX) + NumPy 1.26.
   # Newer JAX needs ml-dtypes>=0.4, which conflicts with TF 2.16; SciPy>=1.14
   # breaks JAX 0.4.23's scipy.linalg expectations.
+  # CUDA JAX/cudnn only on Linux (cluster); CPU JAX on macOS/local.
   "numpy==1.26.4",
   "scipy==1.11.4",
   "ml-dtypes==0.3.2",
-  "jax[cuda12_pip]==0.4.23",
+  "jax[cuda12_pip]==0.4.23; sys_platform == 'linux'",
+  "jax==0.4.23; sys_platform != 'linux'",
   "tensorflow==2.16.2",
   "tensorflow-probability==0.24.0",
   "tensorflow-datasets==4.9.9",
@@ -28,7 +30,7 @@ dependencies = [
   "tf-keras>=2.16.0",
   "blackjax==1.2.5",
   "optax==0.2.2",
-  "nvidia-cudnn-cu12>=8.9,<9",
+  "nvidia-cudnn-cu12>=8.9,<9; sys_platform == 'linux'",
 ]
 authors = [
     {name="David Zoltowski"}, 
@@ -50,3 +52,7 @@ where = ["."]
 
 [tool.uv]
 find-links = ["https://storage.googleapis.com/jax-releases/jax_cuda_releases.html"]
+required-environments = [
+  "sys_platform == 'linux' and platform_machine == 'x86_64'",
+  "sys_platform == 'darwin' and platform_machine == 'arm64'",
+]
