@@ -3,6 +3,6 @@
   "tol": 1e-5,
   "rtol": 1e-5,
   "quasi": true,
-  "qmem_efficient": false,
+  "qmem_efficient": true,
   "clip_val": 1e8
 }

@@ -79,6 +79,7 @@ rtol = deer["rtol"]
 quasi = deer["quasi"]
 qmem_efficient = deer["qmem_efficient"]
 clip_val = deer["clip_val"]
+full_trace = deer["full_trace"]
 
 initial_state = 0.0 + float(cfg["initial_state_scale"]) * jr.normal(skey, (D,))
 max_iter = chain_length
@@ -124,7 +125,7 @@ sampler = samplers.ParallelNUTS(
     dim=D,
     chain_length=chain_length,
     max_iter=max_iter,
-    full_trace=True,
+    full_trace=full_trace,
     damp_factor=damp_factor,
     show_progress=_SHOW_DEER_PROGRESS,
     quasi=quasi,
@@ -136,7 +137,8 @@ sampler = samplers.ParallelNUTS(
     inverse_mass_matrix=inverse_mass_matrix,
 )
 
-print("Running parallel NUTS with full trace for visualization")
+trace_label = "full Newton trace" if full_trace else "final trajectory only"
+print(f"Running parallel NUTS ({trace_label})")
 run_parallel = jax.jit(sampler.run_parallel_nuts)
 states_par, iters = run_parallel(key, initial_state, init_trajectory_guess, params)
 print(f"DEER converged in {int(iters)} / {max_iter} Newton iterations")
@@ -195,7 +197,9 @@ if __name__ == "__main__":
     finalize_run(
         run_dir,
         message=(
-            f"Saved config, plots, states_par.npy, states_seq.npy, GIFs, "
-            f"and Lyapunov outputs under {run_dir}"
+            f"Saved config, states_par.npy, states_seq.npy"
+            + (", Newton-trace plots, GIFs" if full_trace else "")
+            + (", and Lyapunov outputs" if compute_lyap else "")
+            + f" under {run_dir}"
         ),
     )

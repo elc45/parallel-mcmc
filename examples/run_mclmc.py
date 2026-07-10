@@ -73,6 +73,7 @@ rtol = deer["rtol"]
 quasi = deer["quasi"]
 qmem_efficient = deer["qmem_efficient"]
 clip_val = deer["clip_val"]
+full_trace = deer["full_trace"]
 
 initial_state = 0.0 + float(cfg["initial_state_scale"]) * jr.normal(skey, (D,))
 max_iter = chain_length
@@ -107,7 +108,7 @@ sampler = samplers.ParallelMCLMC(
     dim=D,
     chain_length=chain_length,
     max_iter=max_iter,
-    full_trace=True,
+    full_trace=full_trace,
     damp_factor=damp_factor,
     show_progress=_SHOW_DEER_PROGRESS,
     quasi=quasi,
@@ -117,7 +118,8 @@ sampler = samplers.ParallelMCLMC(
     clip_val=clip_val,
 )
 
-print("Running parallel MCLMC with full trace for visualization")
+trace_label = "full Newton trace" if full_trace else "final trajectory only"
+print(f"Running parallel MCLMC ({trace_label})")
 run_parallel = jax.jit(sampler.run_parallel_mclmc)
 states_par_packed, iters = run_parallel(
     key, initial_state, init_trajectory_guess, params

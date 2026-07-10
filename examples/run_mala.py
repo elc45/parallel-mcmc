@@ -91,6 +91,7 @@ adaptive_mass = cfg["adaptive_mass"]
 quasi = deer["quasi"]
 qmem_efficient = deer["qmem_efficient"]
 clip_val = deer["clip_val"]
+full_trace = deer["full_trace"]
 welford_init = cfg.get("welford_init")
 welford_settings = welford_settings_from_config(cfg)
 
@@ -147,7 +148,7 @@ sampler = samplers.ParallelMALA(
     dim=D,
     chain_length=chain_length,
     max_iter=max_iter,
-    full_trace=True,
+    full_trace=full_trace,
     damp_factor=damp_factor,
     show_progress=_SHOW_DEER_PROGRESS,
     quasi=quasi,
@@ -160,7 +161,8 @@ sampler = samplers.ParallelMALA(
     **welford_settings,
 )
 
-print("Running parallel MALA with full trace for visualization")
+trace_label = "full Newton trace" if full_trace else "final trajectory only"
+print(f"Running parallel MALA ({trace_label})")
 run_parallel = jax.jit(sampler.run_parallel_mala)
 states_par, iters = run_parallel(key, initial_state, init_trajectory_guess, params)
 print(f"DEER converged in {int(iters)} / {max_iter} Newton iterations")

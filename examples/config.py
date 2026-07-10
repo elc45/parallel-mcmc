@@ -31,6 +31,7 @@ def deer_kwargs(deer_cfg: dict[str, Any]) -> dict[str, Any]:
         "quasi": bool(deer_cfg["quasi"]),
         "qmem_efficient": bool(deer_cfg["qmem_efficient"]),
         "clip_val": float(deer_cfg["clip_val"]),
+        "full_trace": bool(deer_cfg.get("full_trace", True)),
     }
 
 
@@ -66,7 +67,15 @@ def add_run_config_args(
 
 
 _DEER_ONLY_KEYS = frozenset(
-    {"damp_factor", "tol", "rtol", "quasi", "qmem_efficient", "clip_val"}
+    {
+        "damp_factor",
+        "tol",
+        "rtol",
+        "quasi",
+        "qmem_efficient",
+        "clip_val",
+        "full_trace",
+    }
 )
 
 

@@ -80,52 +80,65 @@ def save_core_deer_outputs(
     Returns ``(states_par_np, states_seq_np, mass_seq)`` where ``mass_seq`` is ``None`` when
     adaptive mass is disabled.
     """
-    states_par_np = plot.trim_newton_trace(states_par, iters)
-    newton_iters = plot.sample_newton_iterations(iters)
+    states_par_np = plot.trim_newton_trace(
+        states_par, iters, chain_length=chain_length
+    )
+    has_newton_trace = plot.has_full_newton_trace(states_par_np, chain_length)
     if progress_suptitle is None:
         progress_suptitle = f"{chain_length} {sampler_label} draws"
 
-    plot.progress_plot(
-        states_par_np,
-        states_seq,
-        initial_state,
-        newton_iters,
-        chain_length=chain_length,
-        quasi=quasi,
-        savepath=run_dir / "progress.png",
-        suptitle=progress_suptitle,
-    )
-    plot.newton_max_error_plot(
-        states_par_np,
-        rtol=rtol,
-        savepath=run_dir / "newton_err.png",
-        title=f"DEER Newton error, {sampler_label} ({target_name})",
-    )
-    if (
-        deer_step_fn is not None
-        and deer_drivers is not None
-        and deer_y0 is not None
-        and deer_params is not None
-    ):
-        residual_sq = plot.newton_fixed_point_residual_sq(
-            states_par_np if deer_states_par is None else plot.trim_newton_trace(deer_states_par, iters),
-            step_fn=deer_step_fn,
-            drivers=deer_drivers,
-            y0=deer_y0,
-            params=deer_params,
+    if has_newton_trace:
+        newton_iters = plot.sample_newton_iterations(iters)
+        plot.progress_plot(
+            states_par_np,
+            states_seq,
+            initial_state,
+            newton_iters,
+            chain_length=chain_length,
+            quasi=quasi,
+            savepath=run_dir / "progress.png",
+            suptitle=progress_suptitle,
         )
-        plot.newton_residual_plot(
-            residual_sq,
-            savepath=run_dir / "newton_residual.png",
-            title=f"Fixed-point residual, {sampler_label} ({target_name})",
+        plot.newton_max_error_plot(
+            states_par_np,
+            rtol=rtol,
+            savepath=run_dir / "newton_err.png",
+            title=f"DEER Newton error, {sampler_label} ({target_name})",
         )
-    plot.newton_truth_error_plot(
-        states_par_np,
-        states_seq,
-        dim=dim,
-        savepath=run_dir / "newton_truth_err.png",
-        title=f"Parallel-vs-sequential trajectory error, {sampler_label} ({target_name})",
-    )
+        if (
+            deer_step_fn is not None
+            and deer_drivers is not None
+            and deer_y0 is not None
+            and deer_params is not None
+        ):
+            residual_sq = plot.newton_fixed_point_residual_sq(
+                states_par_np
+                if deer_states_par is None
+                else plot.trim_newton_trace(
+                    deer_states_par, iters, chain_length=chain_length
+                ),
+                step_fn=deer_step_fn,
+                drivers=deer_drivers,
+                y0=deer_y0,
+                params=deer_params,
+            )
+            plot.newton_residual_plot(
+                residual_sq,
+                savepath=run_dir / "newton_residual.png",
+                title=f"Fixed-point residual, {sampler_label} ({target_name})",
+            )
+        plot.newton_truth_error_plot(
+            states_par_np,
+            states_seq,
+            dim=dim,
+            savepath=run_dir / "newton_truth_err.png",
+            title=f"Parallel-vs-sequential trajectory error, {sampler_label} ({target_name})",
+        )
+    else:
+        print(
+            "Skipping Newton-trace plots (parallel DEER used full_trace=False); "
+            "saving final trajectory arrays only."
+        )
 
     np.save(run_dir / "states_par.npy", states_par_np)
     states_seq_np = np.asarray(jax.device_get(states_seq))
@@ -162,40 +175,44 @@ def save_core_deer_outputs(
             run_dir / "mass_matrix_seq.png",
             title=f"Sequential diagonal mass matrix, {sampler_label} ({target_name})",
         )
-        plot.newton_mass_truth_error_plot(
-            mass_par,
-            mass_seq,
-            savepath=run_dir / "newton_mass_truth_err.png",
-            title=f"Parallel-vs-sequential mass matrix error, {sampler_label} ({target_name})",
-        )
+        if has_newton_trace:
+            plot.newton_mass_truth_error_plot(
+                mass_par,
+                mass_seq,
+                savepath=run_dir / "newton_mass_truth_err.png",
+                title=f"Parallel-vs-sequential mass matrix error, {sampler_label} ({target_name})",
+            )
 
-    print("Creating GIFs...")
-    if adaptive_mass_mode is not None:
-        unpacked = unpack_adaptive_state_trajectory(states_par_np, dim, adaptive_mass_mode)
-        position_arr = unpacked[0]
-        m2_arr = unpacked[2]
-        num_newton_iters, chain_len = states_par_np.shape[0], states_par_np.shape[1]
-        count_1d = welford_count_trajectory(chain_len, mass_adapt_steps)
-        count_arr = np.broadcast_to(count_1d, (num_newton_iters, chain_len))
-        plot.mass_matrix_convergence_gif(
-            m2_arr,
-            run_dir / "mass_matrix_trace.gif",
-            count=count_arr,
-            max_newton_iter=int(iters),
-            welford_method=welford_method,
-            welford_n_init=welford_n_init,
-        )
-        plot.position_convergence_gif(
-            position_arr,
-            run_dir / "trace.gif",
-            max_newton_iter=int(iters),
-        )
-    else:
-        plot.position_convergence_gif(
-            states_par_np,
-            run_dir / "trace.gif",
-            max_newton_iter=int(iters),
-        )
+    if has_newton_trace:
+        print("Creating GIFs...")
+        if adaptive_mass_mode is not None:
+            unpacked = unpack_adaptive_state_trajectory(
+                states_par_np, dim, adaptive_mass_mode
+            )
+            position_arr = unpacked[0]
+            m2_arr = unpacked[2]
+            num_newton_iters, chain_len = states_par_np.shape[0], states_par_np.shape[1]
+            count_1d = welford_count_trajectory(chain_len, mass_adapt_steps)
+            count_arr = np.broadcast_to(count_1d, (num_newton_iters, chain_len))
+            plot.mass_matrix_convergence_gif(
+                m2_arr,
+                run_dir / "mass_matrix_trace.gif",
+                count=count_arr,
+                max_newton_iter=int(iters),
+                welford_method=welford_method,
+                welford_n_init=welford_n_init,
+            )
+            plot.position_convergence_gif(
+                position_arr,
+                run_dir / "trace.gif",
+                max_newton_iter=int(iters),
+            )
+        else:
+            plot.position_convergence_gif(
+                states_par_np,
+                run_dir / "trace.gif",
+                max_newton_iter=int(iters),
+            )
 
     return states_par_np, states_seq_np, mass_seq
 
@@ -235,6 +252,12 @@ def save_lyapunov_outputs(
         f"Lyapunov exponent: {lyap['lyapunov_exponent']:.4f} "
         f"(tail: {lyap['lyapunov_exponent_tail']:.4f}, tangent={tangent_subspace})"
     )
+
+    if not plot.has_full_newton_trace(states_par_np, chain_length):
+        print(
+            "Skipping per-Newton Lyapunov outputs (parallel DEER used full_trace=False)."
+        )
+        return
 
     print("Computing Lyapunov exponent along each Newton trajectory...")
     lyap_by_newton = lyapunov_exponent_by_newton(

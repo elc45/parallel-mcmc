@@ -80,16 +80,38 @@ def _to_numpy(arr: jnp.ndarray | np.ndarray) -> np.ndarray:
     return np.asarray(jax.device_get(arr))
 
 
+def has_full_newton_trace(
+    states_par: jnp.ndarray | np.ndarray,
+    chain_length: int | None = None,
+) -> bool:
+    """True when ``states_par`` stores per-Newton iterates (``full_trace=True``).
+
+    With ``full_trace=False``, DEER returns the final trajectory only, shape ``(T, ...)``.
+    With ``full_trace=True``, the trace has shape ``(num_newton_iters + 1, T, ...)``.
+    """
+    arr = _to_numpy(states_par)
+    if arr.ndim >= 3:
+        return True
+    if arr.ndim == 2 and chain_length is not None:
+        return arr.shape[0] != chain_length
+    return False
+
+
 def trim_newton_trace(
     states_par: jnp.ndarray | np.ndarray,
     converged_iters: int,
+    *,
+    chain_length: int | None = None,
 ) -> np.ndarray:
     """Host numpy trace through Newton iterate ``converged_iters`` (inclusive).
 
     DEER scans materialize ``max_iter + 1`` iterates even after early convergence; drop the
-    identical post-convergence tail before plotting or saving.
+    identical post-convergence tail before plotting or saving. When ``full_trace=False``,
+    returns the final trajectory unchanged.
     """
     arr = _to_numpy(states_par)
+    if not has_full_newton_trace(arr, chain_length):
+        return arr
     n_keep = min(int(converged_iters) + 1, arr.shape[0])
     return arr[:n_keep]
 
