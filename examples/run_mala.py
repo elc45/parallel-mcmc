@@ -26,7 +26,12 @@ _REPO_ROOT = _EXAMPLES_DIR.parent
 if str(_EXAMPLES_DIR) not in sys.path:
     sys.path.insert(0, str(_EXAMPLES_DIR))
 
-from run_outputs import lyapunov_config_from_cfg, save_core_deer_outputs, save_lyapunov_outputs
+from run_outputs import (
+    deer_fixed_point_kwargs,
+    lyapunov_config_from_cfg,
+    save_core_deer_outputs,
+    save_lyapunov_outputs,
+)
 from config import (
     SAMPLER_CONFIGS_DIR,
     add_run_config_args,
@@ -177,6 +182,11 @@ if __name__ == "__main__":
     )
 
     adaptive_mass_mode = samplers._normalize_adaptive_mass(adaptive_mass)
+    deer_y0 = (
+        sampler._initial_packed_state(initial_state)
+        if adaptive_mass_mode is not None
+        else initial_state
+    )
     states_par_np, _, _ = save_core_deer_outputs(
         run_dir,
         states_par=states_par,
@@ -196,6 +206,15 @@ if __name__ == "__main__":
         mass_adapt_steps=params["mass_adapt_steps"],
         welford_method=sampler.welford_method,
         welford_n_init=sampler.welford_n_init,
+        **deer_fixed_point_kwargs(
+            key=key,
+            chain_length=chain_length,
+            y0=deer_y0,
+            step_fn=sampler.mala_fn_for_deer,
+            params=params,
+            quasi=quasi,
+            qmem_efficient=qmem_efficient,
+        ),
     )
 
     compute_lyap, lyap_tangent_key, tangent_subspace = lyapunov_config_from_cfg(cfg)

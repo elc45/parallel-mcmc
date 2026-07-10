@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
 import jax
 import jax.numpy as jnp
@@ -109,10 +110,14 @@ def sample_newton_iterations(converged_iters: int) -> list[int]:
 
 
 def newton_max_errors(states_par: jnp.ndarray | np.ndarray, rtol: float | None = None) -> np.ndarray:
-    """Scalar DEER-style error per Newton step (matches ``deer.deer_iteration_helper.scan_func``).
+    """Scalar DEER Newton-step change per iteration (matches ``deer.deer_iteration_helper``).
 
-    For consecutive trajectory iterates ``Y_{k-1}, Y_k`` (first axis of ``states_par``),
+    For consecutive Newton iterates ``Y_{k-1}, Y_k`` (first axis of ``states_par``),
     returns ``max(|Y_k - Y_{k-1}| - rtol * |Y_{k-1}|)`` over all other dimensions.
+
+    This is the quantity DEER compares to ``tol`` for early stopping. It is *not* the
+    fixed-point residual ``||r(s)||^2`` with ``r_i = s_i - f(s_{i-1})``; see
+    :func:`newton_fixed_point_residual_sq`.
 
     Parameters
     ----------
@@ -132,6 +137,62 @@ def newton_max_errors(states_par: jnp.ndarray | np.ndarray, rtol: float | None =
         nxt = arr[k]
         errors[k - 1] = np.max(np.abs(nxt - prev) - rtol * np.abs(prev))
     return errors
+
+
+def fixed_point_residual_sq(
+    trajectory: jnp.ndarray | np.ndarray,
+    *,
+    step_fn: Callable[..., jnp.ndarray],
+    drivers: tuple[jnp.ndarray, jnp.ndarray],
+    y0: jnp.ndarray | np.ndarray,
+    params: Any,
+) -> float:
+    """Squared L2 norm of the DEER fixed-point residual at one Newton guess.
+
+    For trajectory guess ``s`` (shape ``(T, ...)``), forms ``r_i = s_i - f(s_{i-1})`` where
+    ``f`` is the per-step map passed as ``step_fn`` and ``s_{-1}`` is replaced by ``y0``.
+    Returns ``||r||^2 = sum_i ||r_i||^2`` over all state components.
+    """
+    traj = np.asarray(jax.device_get(trajectory), dtype=np.float64)
+    y0_np = np.asarray(jax.device_get(y0), dtype=np.float64)
+    if not np.all(np.isfinite(traj)) or not np.all(np.isfinite(y0_np)):
+        return float("nan")
+    if np.max(np.abs(traj)) > 1e30 or np.max(np.abs(y0_np)) > 1e30:
+        return float("nan")
+
+    traj_j = jnp.asarray(traj)
+    y0_j = jnp.asarray(y0_np)
+    shifted = jnp.concatenate([y0_j[None, ...], traj_j[:-1]], axis=0)
+    keys, times = drivers
+    f_vals = jax.vmap(step_fn, in_axes=(0, 0, None))(shifted, (keys, times), params)
+    residual = traj_j - f_vals
+    out = float(jnp.sum(jnp.square(residual)))
+    return out if np.isfinite(out) else float("nan")
+
+
+def newton_fixed_point_residual_sq(
+    states_par: jnp.ndarray | np.ndarray,
+    *,
+    step_fn: Callable[..., jnp.ndarray],
+    drivers: tuple[jnp.ndarray, jnp.ndarray],
+    y0: jnp.ndarray | np.ndarray,
+    params: Any,
+) -> np.ndarray:
+    """``||r(s)||^2`` at each stored Newton iterate (index ``0`` is the initial guess)."""
+    arr = _to_numpy(states_par)
+    return np.array(
+        [
+            fixed_point_residual_sq(
+                arr[k],
+                step_fn=step_fn,
+                drivers=drivers,
+                y0=y0,
+                params=params,
+            )
+            for k in range(arr.shape[0])
+        ],
+        dtype=np.float64,
+    )
 
 
 def newton_max_error_plot(
@@ -172,23 +233,22 @@ def newton_max_error_plot(
 
 
 def newton_residual_plot(
-    states_par: jnp.ndarray | np.ndarray,
+    residual_sq: np.ndarray,
     *,
-    rtol: float | None = None,
-    tol: float | None = None,
-    newton_iterations_start_at: int = 1,
+    newton_iterations_start_at: int = 0,
     figsize: tuple[float, float] = (7.0, 4.0),
     savepath: Path | str | None = None,
     title: str | None = None,
     ax: plt.Axes | None = None,
 ) -> tuple[plt.Figure, plt.Axes]:
-    """Line plot: Newton iteration vs DEER residual used for early stopping.
+    """Line plot: Newton iteration vs fixed-point residual ``||r(s)||^2``.
 
-    Plots the same scalar residual as :func:`newton_max_errors` on a log scale, with an
-    optional horizontal line at the absolute tolerance ``tol``.
+    ``r_i = s_i - f(s_{i-1})`` for each Markov-chain index ``i``, with ``s_{-1}`` replaced
+    by the initial state ``y0``. One scalar per stored Newton iterate in ``residual_sq``.
     """
-    residuals = newton_max_errors(states_par, rtol=rtol)
-    iters = np.arange(residuals.shape[0], dtype=np.int32) + int(newton_iterations_start_at)
+    residual_sq = np.asarray(residual_sq, dtype=np.float64)
+    iters = np.arange(residual_sq.shape[0], dtype=np.int32) + int(newton_iterations_start_at)
+    plot_vals = np.where(np.isfinite(residual_sq) & (residual_sq > 0), residual_sq, np.nan)
 
     created_fig = ax is None
     if created_fig:
@@ -196,21 +256,24 @@ def newton_residual_plot(
     else:
         fig = ax.figure
 
-    ax.semilogy(iters, residuals, marker="o", ms=3, lw=1.2)
-    if tol is not None:
-        ax.axhline(
-            tol,
-            color="k",
-            ls="--",
-            alpha=0.6,
-            label=rf"tol = {tol:g}",
+    ax.semilogy(iters, plot_vals, marker="o", ms=3, lw=1.2)
+    bad = ~np.isfinite(plot_vals)
+    if np.any(bad):
+        ax.scatter(
+            iters[bad],
+            np.full(int(np.sum(bad)), 1.0),
+            marker="x",
+            c="C3",
+            s=24,
+            zorder=3,
+            label="non-finite / overflow",
         )
-        ax.legend()
+        ax.legend(loc="best", fontsize=9)
     ax.set_xlabel("Newton iteration", fontsize=12)
-    ax.set_ylabel(
-        r"$\max \; |\Delta Y| - \mathrm{rtol}\,|Y_{\mathrm{prev}}|$",
-        fontsize=11,
-    )
+    ylabel = r"$\|r(s)\|^2$"
+    if np.any(~bad):
+        finite = plot_vals[np.isfinite(plot_vals)]
+    ax.set_ylabel(ylabel, fontsize=11)
     if title is not None:
         ax.set_title(title, fontsize=12)
     ax.grid(True, alpha=0.35)
@@ -471,13 +534,13 @@ def mass_matrix_seq_plot(
     title: str = "Sequential diagonal mass matrix",
 ) -> None:
     """Static plot of the true sequential mass-matrix diagonal vs Markov chain index."""
-    mass_seq = np.asarray(mass_seq)
+    mass_seq = np.asarray(np.log(mass_seq))
     chain_length, D = mass_seq.shape
     fig, ax = plt.subplots(figsize=(8, 4))
     for d in range(min(D, max_dims)):
         ax.plot(np.arange(chain_length), mass_seq[:, d], lw=1.5, label=f"dim {d}")
     ax.set_xlabel("Markov chain iteration", fontsize=12)
-    ax.set_ylabel("diagonal mass", fontsize=12)
+    ax.set_ylabel("log(M_i)", fontsize=12)
     ax.set_title(title, fontsize=12)
     ax.legend()
     ax.grid(True, alpha=0.3)

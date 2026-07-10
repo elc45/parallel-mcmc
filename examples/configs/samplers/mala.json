@@ -1,8 +1,8 @@
 {
   "chain_length": 1000,
   "random_seed": 42,
-  "initial_state_scale": 5000.0,
-  "adaptive_mass": null,
+  "initial_state_scale": 2.0,
+  "adaptive_mass": "draw-only",
   "welford_method": "standard",
   "epsilon": 1.0,
   "mass_adapt_steps": 250,

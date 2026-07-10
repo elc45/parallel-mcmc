@@ -23,7 +23,12 @@ _REPO_ROOT = _EXAMPLES_DIR.parent
 if str(_EXAMPLES_DIR) not in sys.path:
     sys.path.insert(0, str(_EXAMPLES_DIR))
 
-from run_outputs import lyapunov_config_from_cfg, save_core_deer_outputs, save_lyapunov_outputs
+from run_outputs import (
+    deer_fixed_point_kwargs,
+    lyapunov_config_from_cfg,
+    save_core_deer_outputs,
+    save_lyapunov_outputs,
+)
 from config import (
     SAMPLER_CONFIGS_DIR,
     add_run_config_args,
@@ -160,6 +165,15 @@ if __name__ == "__main__":
         sampler_label="NUTS",
         target_name=target.name,
         progress_suptitle=f"{chain_length} NUTS draws",
+        **deer_fixed_point_kwargs(
+            key=key,
+            chain_length=chain_length,
+            y0=initial_state,
+            step_fn=sampler.nuts_fn_for_deer,
+            params=params,
+            quasi=quasi,
+            qmem_efficient=qmem_efficient,
+        ),
     )
 
     compute_lyap, lyap_tangent_key, tangent_subspace = lyapunov_config_from_cfg(cfg)

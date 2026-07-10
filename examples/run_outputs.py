@@ -23,6 +23,32 @@ from src.util import (
 import plot
 
 
+def deer_fixed_point_kwargs(
+    *,
+    key: jnp.ndarray,
+    chain_length: int,
+    y0: jnp.ndarray | np.ndarray,
+    step_fn: Callable[..., jnp.ndarray],
+    params: Any,
+    quasi: bool | str = False,
+    qmem_efficient: bool = False,
+    driver_key: jnp.ndarray | None = None,
+) -> dict[str, Any]:
+    """Build kwargs for :func:`save_core_deer_outputs` fixed-point residual plotting."""
+    deer_params = params
+    fp_key = driver_key if driver_key is not None else key
+    if quasi and qmem_efficient and isinstance(params, dict) and "key" not in params:
+        fp_key, qmem_key = jr.split(fp_key)
+        deer_params = {**params, "key": qmem_key}
+    drivers = (jr.split(fp_key, (chain_length,)), jnp.arange(chain_length))
+    return {
+        "deer_step_fn": step_fn,
+        "deer_drivers": drivers,
+        "deer_y0": y0,
+        "deer_params": deer_params,
+    }
+
+
 def save_core_deer_outputs(
     run_dir: Path,
     *,
@@ -43,6 +69,11 @@ def save_core_deer_outputs(
     mass_adapt_steps: int | None = None,
     welford_method: Literal["standard", "discounted"] = "standard",
     welford_n_init: float = 0.0,
+    deer_step_fn: Callable[..., jnp.ndarray] | None = None,
+    deer_drivers: tuple[jnp.ndarray, jnp.ndarray] | None = None,
+    deer_y0: jnp.ndarray | np.ndarray | None = None,
+    deer_params: Any = None,
+    deer_states_par: jnp.ndarray | np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
     """Save standard DEER diagnostics: plots, arrays, and optional adaptive-mass outputs.
 
@@ -70,13 +101,24 @@ def save_core_deer_outputs(
         savepath=run_dir / "newton_err.png",
         title=f"DEER Newton error, {sampler_label} ({target_name})",
     )
-    plot.newton_residual_plot(
-        states_par_np,
-        rtol=rtol,
-        tol=tol,
-        savepath=run_dir / "newton_residual.png",
-        title=f"DEER residual, {sampler_label} ({target_name})",
-    )
+    if (
+        deer_step_fn is not None
+        and deer_drivers is not None
+        and deer_y0 is not None
+        and deer_params is not None
+    ):
+        residual_sq = plot.newton_fixed_point_residual_sq(
+            states_par_np if deer_states_par is None else plot.trim_newton_trace(deer_states_par, iters),
+            step_fn=deer_step_fn,
+            drivers=deer_drivers,
+            y0=deer_y0,
+            params=deer_params,
+        )
+        plot.newton_residual_plot(
+            residual_sq,
+            savepath=run_dir / "newton_residual.png",
+            title=f"Fixed-point residual, {sampler_label} ({target_name})",
+        )
     plot.newton_truth_error_plot(
         states_par_np,
         states_seq,

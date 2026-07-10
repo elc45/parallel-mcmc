@@ -97,28 +97,6 @@ def _pack_adaptive_state(position, mean_draw, m2_draw, mean_grad, m2_grad):
     )
 
 
-def _normalize_welford_method(
-    welford_method: str | None,
-) -> Literal["standard", "discounted"]:
-    """Map config input to ``\"standard\"`` or ``\"discounted\"`` Welford."""
-    if welford_method is None:
-        return "standard"
-    if not isinstance(welford_method, str):
-        raise TypeError(
-            "welford_method must be a string or None, "
-            f"got {type(welford_method).__name__}"
-        )
-    key = welford_method.strip().lower()
-    if key in ("standard", "classic", ""):
-        return "standard"
-    if key in ("discounted", "discount"):
-        return "discounted"
-    raise ValueError(
-        "welford_method must be 'standard' or 'discounted' "
-        f"(got {welford_method!r})"
-    )
-
-
 def _welford_update_diag(
     count: jnp.ndarray,
     mean: jnp.ndarray,
@@ -414,7 +392,7 @@ class ParallelHMC:
         self.rtol = rtol
         self.adaptive_mass = _normalize_adaptive_mass(adaptive_mass)
         self.welford_init = dict(welford_init) if welford_init else {}
-        self.welford_method = _normalize_welford_method(welford_method)
+        self.welford_method = welford_method
         init_n = self.welford_init.get("n_init", 0.0)
         self.welford_n_init = float(
             welford_n_init if welford_n_init is not None else init_n

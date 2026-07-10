@@ -29,11 +29,11 @@
 #SBATCH --job-name=deer_run
 #SBATCH --output=logs/deer_run_%j.out
 #SBATCH --error=logs/deer_run_%j.err
-#SBATCH --time=01:00:00
+#SBATCH --time=00:20:00
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=32G
-#SBATCH --gpus-per-task=2
+#SBATCH --gpus-per-task=1
 
 set -euo pipefail
 
