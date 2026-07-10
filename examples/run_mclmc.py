@@ -5,7 +5,6 @@ from pathlib import Path
 import jax
 import jax.numpy as jnp
 import jax.random as jr
-import numpy as np
 from src import samplers
 
 _EXAMPLES_DIR = Path(__file__).resolve().parent
@@ -13,7 +12,7 @@ _REPO_ROOT = _EXAMPLES_DIR.parent
 if str(_EXAMPLES_DIR) not in sys.path:
     sys.path.insert(0, str(_EXAMPLES_DIR))
 
-import plot as hmc_plot
+from run_outputs import save_core_deer_outputs
 from config import (
     SAMPLER_CONFIGS_DIR,
     add_run_config_args,
@@ -137,45 +136,19 @@ if __name__ == "__main__":
         target=args.target,
     )
 
-    plot_progress = run_dir / "progress.png"
-    plot_newton = run_dir / "newton_err.png"
-    plot_newton_truth = run_dir / "newton_truth_err.png"
-
-    states_par_np = hmc_plot.trim_newton_trace(states_par, iters)
-    newton_iters = hmc_plot.sample_newton_iterations(iters)
-
-    hmc_plot.progress_plot(
-        states_par_np,
-        states_seq,
-        initial_state,
-        newton_iters,
+    save_core_deer_outputs(
+        run_dir,
+        states_par=states_par,
+        states_seq=states_seq,
+        initial_state=initial_state,
+        iters=int(iters),
         chain_length=chain_length,
-        quasi=quasi,
-        savepath=plot_progress,
-    )
-    hmc_plot.newton_max_error_plot(
-        states_par_np,
-        rtol=rtol,
-        savepath=plot_newton,
-        title=f"DEER Newton error ({target.name}, MCLMC)",
-    )
-    hmc_plot.newton_truth_error_plot(
-        states_par_np,
-        states_seq,
         dim=D,
-        savepath=plot_newton_truth,
-        title=f"Parallel-vs-sequential trajectory error ({target.name}, MCLMC)",
-    )
-
-    np.save(run_dir / "states_par.npy", states_par_np)
-
-    states_seq_np = np.asarray(jax.device_get(states_seq))
-    np.save(run_dir / "states_seq.npy", states_seq_np)
-
-    hmc_plot.position_convergence_gif(
-        states_par_np,
-        run_dir / "trace.gif",
-        max_newton_iter=int(iters),
+        rtol=rtol,
+        tol=tol,
+        quasi=quasi,
+        sampler_label="MCLMC",
+        target_name=target.name,
     )
 
     finalize_run(

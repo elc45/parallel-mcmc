@@ -1,4 +1,4 @@
-"""Plotting helpers for parallel HMC / DEER examples."""
+"""Plotting helpers for parallel MCMC / DEER example runs."""
 
 from __future__ import annotations
 
@@ -161,6 +161,56 @@ def newton_max_error_plot(
     ax.plot(iters, np.log(errors), marker="o", ms=3, lw=1.2)
     ax.set_xlabel("Newton iteration", fontsize=12)
     ax.set_ylabel(r"log($\max \; |\Delta Y| - \mathrm{rtol}\,|Y_{\mathrm{prev}}|$)", fontsize=11)
+    if title is not None:
+        ax.set_title(title, fontsize=12)
+    ax.grid(True, alpha=0.35)
+    if created_fig:
+        fig.tight_layout()
+    if savepath is not None:
+        fig.savefig(savepath, dpi=150, bbox_inches="tight")
+    return fig, ax
+
+
+def newton_residual_plot(
+    states_par: jnp.ndarray | np.ndarray,
+    *,
+    rtol: float | None = None,
+    tol: float | None = None,
+    newton_iterations_start_at: int = 1,
+    figsize: tuple[float, float] = (7.0, 4.0),
+    savepath: Path | str | None = None,
+    title: str | None = None,
+    ax: plt.Axes | None = None,
+) -> tuple[plt.Figure, plt.Axes]:
+    """Line plot: Newton iteration vs DEER residual used for early stopping.
+
+    Plots the same scalar residual as :func:`newton_max_errors` on a log scale, with an
+    optional horizontal line at the absolute tolerance ``tol``.
+    """
+    residuals = newton_max_errors(states_par, rtol=rtol)
+    iters = np.arange(residuals.shape[0], dtype=np.int32) + int(newton_iterations_start_at)
+
+    created_fig = ax is None
+    if created_fig:
+        fig, ax = plt.subplots(figsize=figsize)
+    else:
+        fig = ax.figure
+
+    ax.semilogy(iters, residuals, marker="o", ms=3, lw=1.2)
+    if tol is not None:
+        ax.axhline(
+            tol,
+            color="k",
+            ls="--",
+            alpha=0.6,
+            label=rf"tol = {tol:g}",
+        )
+        ax.legend()
+    ax.set_xlabel("Newton iteration", fontsize=12)
+    ax.set_ylabel(
+        r"$\max \; |\Delta Y| - \mathrm{rtol}\,|Y_{\mathrm{prev}}|$",
+        fontsize=11,
+    )
     if title is not None:
         ax.set_title(title, fontsize=12)
     ax.grid(True, alpha=0.35)
@@ -411,6 +461,29 @@ def progress_plot(
     if savepath is not None:
         fig.savefig(savepath, dpi=150, bbox_inches="tight")
     return fig
+
+
+def mass_matrix_seq_plot(
+    mass_seq: np.ndarray,
+    savepath: Path | str,
+    *,
+    max_dims: int = 4,
+    title: str = "Sequential diagonal mass matrix",
+) -> None:
+    """Static plot of the true sequential mass-matrix diagonal vs Markov chain index."""
+    mass_seq = np.asarray(mass_seq)
+    chain_length, D = mass_seq.shape
+    fig, ax = plt.subplots(figsize=(8, 4))
+    for d in range(min(D, max_dims)):
+        ax.plot(np.arange(chain_length), mass_seq[:, d], lw=1.5, label=f"dim {d}")
+    ax.set_xlabel("Markov chain iteration", fontsize=12)
+    ax.set_ylabel("diagonal mass", fontsize=12)
+    ax.set_title(title, fontsize=12)
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(savepath, dpi=150, bbox_inches="tight")
+    plt.close(fig)
 
 
 def mass_matrix_convergence_gif(

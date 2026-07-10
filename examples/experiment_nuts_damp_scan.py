@@ -42,16 +42,20 @@ DEFAULT_SCAN_DIR = (
     / "damp_factor"
     / "blr_german_credit"
 )
-DEFAULT_RESULTS_DIR = DEFAULT_SCAN_DIR / "results"
-DEFAULT_OUTPUT = DEFAULT_SCAN_DIR / "n_iters_vs_damp_factor.png"
+DEFAULT_STEP_SIZE = 0.05
 
 
-def _run_key_for_task(seed: int, task_id: int) -> jnp.ndarray:
-    """Match the PRNG stream used by the sequential full-sweep driver."""
+def _eps_results_dir(step_size: float) -> Path:
+    return DEFAULT_SCAN_DIR / "results" / f"eps_{float(step_size):g}"
+
+
+def _default_output(results_dir: Path) -> Path:
+    return results_dir / "n_iters_vs_damp_factor.png"
+
+
+def _run_key_for_seed(seed: int) -> jnp.ndarray:
+    """PRNG key for a single (damp_factor, seed) replicate."""
     key = jr.PRNGKey(seed)
-    key, _init_key = jr.split(key)
-    for _ in range(task_id):
-        key, _ = jr.split(key)
     _key, run_key = jr.split(key)
     return run_key
 
@@ -60,6 +64,12 @@ def _initial_state_for_seed(seed: int, dim: int, scale: float) -> jnp.ndarray:
     key = jr.PRNGKey(seed)
     _key, init_key = jr.split(key)
     return scale * jr.normal(init_key, (dim,))
+
+
+def _normalize_seeds(seeds: list[int] | None, random_seed: int) -> list[int]:
+    if seeds:
+        return [int(s) for s in seeds]
+    return [int(random_seed)]
 
 
 def _run_parallel_iters(
@@ -98,78 +108,30 @@ def _shared_run_setup(args: argparse.Namespace):
     deer_cfg = load_deer_config(args.deer_config.resolve())
     deer_base = deer_kwargs(deer_cfg)
     target = load_target(args.target)
-    initial_state = _initial_state_for_seed(
-        args.random_seed, target.dim, args.initial_state_scale
-    )
     params = {
         "step_size": float(args.step_size),
         "max_num_doublings": int(args.max_num_doublings),
     }
-    return deer_base, target, initial_state, params
+    return deer_base, target, params
 
 
-def run_single(args: argparse.Namespace) -> None:
-    if args.damp_factor is None:
-        raise ValueError("--damp-factor is required for run mode")
-    if args.task_id is None:
-        raise ValueError("--task-id is required for run mode")
-
-    deer_base, target, initial_state, params = _shared_run_setup(args)
-    damp_factor = float(args.damp_factor)
+def _run_damp_over_seeds(
+    *,
+    args: argparse.Namespace,
+    deer_base: dict,
+    target,
+    params: dict,
+    damp_factor: float,
+    seeds: list[int],
+) -> tuple[list[int], float]:
+    """Return per-seed iteration counts and their mean."""
     deer = {**deer_base, "damp_factor": damp_factor}
-    run_key = _run_key_for_task(args.random_seed, int(args.task_id))
-
-    n_iters = _run_parallel_iters(
-        target_log_prob=target.log_prob,
-        dim=target.dim,
-        chain_length=args.chain_length,
-        key=run_key,
-        initial_state=initial_state,
-        params=params,
-        deer=deer,
-        damp_factor=damp_factor,
-    )
-    print(f"damp_factor={damp_factor:g}  n_iters={n_iters}")
-
-    results_dir = args.results_dir.resolve()
-    results_dir.mkdir(parents=True, exist_ok=True)
-    result_path = results_dir / f"task_{int(args.task_id):02d}.json"
-    payload = {
-        "task_id": int(args.task_id),
-        "damp_factor": damp_factor,
-        "n_iters": n_iters,
-        "target": args.target,
-        "step_size": float(args.step_size),
-        "chain_length": int(args.chain_length),
-        "random_seed": int(args.random_seed),
-    }
-    result_path.write_text(json.dumps(payload, indent=2) + "\n")
-    print(f"Wrote {result_path}")
-
-
-def plot_results(args: argparse.Namespace) -> None:
-    from plot_nuts_damp_scan import plot_damp_scan
-
-    plot_damp_scan(
-        results_dir=args.results_dir.resolve(),
-        output=args.output.resolve(),
-        target=args.target,
-        step_size=args.step_size,
-        chain_length=args.chain_length,
-        expected_n=len(args.damp_factors) if args.damp_factors else len(DEFAULT_DAMP_FACTORS),
-    )
-
-
-def run_full_sweep(args: argparse.Namespace) -> None:
-    deer_base, target, initial_state, params = _shared_run_setup(args)
-    damp_factors = list(args.damp_factors or DEFAULT_DAMP_FACTORS)
-
-    results_dir = args.results_dir.resolve()
-    results_dir.mkdir(parents=True, exist_ok=True)
-
-    for task_id, damp_factor in enumerate(damp_factors):
-        deer = {**deer_base, "damp_factor": float(damp_factor)}
-        run_key = _run_key_for_task(args.random_seed, task_id)
+    n_iters_per_seed: list[int] = []
+    for seed in seeds:
+        initial_state = _initial_state_for_seed(
+            seed, target.dim, args.initial_state_scale
+        )
+        run_key = _run_key_for_seed(seed)
         n_iters = _run_parallel_iters(
             target_log_prob=target.log_prob,
             dim=target.dim,
@@ -178,19 +140,117 @@ def run_full_sweep(args: argparse.Namespace) -> None:
             initial_state=initial_state,
             params=params,
             deer=deer,
-            damp_factor=float(damp_factor),
+            damp_factor=damp_factor,
         )
-        print(f"damp_factor={damp_factor:g}  n_iters={n_iters}")
+        n_iters_per_seed.append(n_iters)
+        print(f"damp_factor={damp_factor:g}  seed={seed}  n_iters={n_iters}")
+    mean_iters = sum(n_iters_per_seed) / len(n_iters_per_seed)
+    return n_iters_per_seed, mean_iters
+
+
+def run_single(args: argparse.Namespace) -> None:
+    if args.damp_factor is None:
+        raise ValueError("--damp-factor is required for run mode")
+    if args.task_id is None:
+        raise ValueError("--task-id is required for run mode")
+
+    deer_base, target, params = _shared_run_setup(args)
+    damp_factor = float(args.damp_factor)
+    seeds = _normalize_seeds(args.random_seeds, args.random_seed)
+
+    n_iters_per_seed, mean_iters = _run_damp_over_seeds(
+        args=args,
+        deer_base=deer_base,
+        target=target,
+        params=params,
+        damp_factor=damp_factor,
+        seeds=seeds,
+    )
+    print(
+        f"damp_factor={damp_factor:g}  mean_n_iters={mean_iters:.2f} "
+        f"over {len(seeds)} seed(s)"
+    )
+
+    results_dir = _resolve_results_dir(args)
+    results_dir.mkdir(parents=True, exist_ok=True)
+    result_path = results_dir / f"task_{int(args.task_id):02d}.json"
+    payload = {
+        "task_id": int(args.task_id),
+        "damp_factor": damp_factor,
+        "n_iters": mean_iters,
+        "n_iters_per_seed": n_iters_per_seed,
+        "target": args.target,
+        "step_size": float(args.step_size),
+        "chain_length": int(args.chain_length),
+        "random_seed": seeds[0],
+        "random_seeds": seeds,
+    }
+    result_path.write_text(json.dumps(payload, indent=2) + "\n")
+    print(f"Wrote {result_path}")
+
+
+def _resolve_results_dir(args: argparse.Namespace) -> Path:
+    if args.results_dir is not None:
+        return args.results_dir.resolve()
+    return _eps_results_dir(args.step_size)
+
+
+def _resolve_output(args: argparse.Namespace, results_dir: Path) -> Path:
+    if args.output is not None:
+        return args.output.resolve()
+    return _default_output(results_dir)
+
+
+def plot_results(args: argparse.Namespace) -> None:
+    from plot_nuts_damp_scan import plot_damp_scan
+
+    results_dir = _resolve_results_dir(args)
+    output = _resolve_output(args, results_dir)
+    # Plot whatever task_*.json files are present; expected_n is optional.
+    expected_n = len(args.damp_factors) if args.damp_factors else None
+    plot_damp_scan(
+        results_dir=results_dir,
+        output=output,
+        target=args.target,
+        step_size=args.step_size,
+        chain_length=args.chain_length,
+        expected_n=expected_n,
+    )
+
+
+def run_full_sweep(args: argparse.Namespace) -> None:
+    deer_base, target, params = _shared_run_setup(args)
+    damp_factors = list(args.damp_factors or DEFAULT_DAMP_FACTORS)
+    seeds = _normalize_seeds(args.random_seeds, args.random_seed)
+
+    results_dir = _resolve_results_dir(args)
+    results_dir.mkdir(parents=True, exist_ok=True)
+
+    for task_id, damp_factor in enumerate(damp_factors):
+        n_iters_per_seed, mean_iters = _run_damp_over_seeds(
+            args=args,
+            deer_base=deer_base,
+            target=target,
+            params=params,
+            damp_factor=float(damp_factor),
+            seeds=seeds,
+        )
+        print(
+            f"damp_factor={damp_factor:g}  mean_n_iters={mean_iters:.2f} "
+            f"over {len(seeds)} seed(s)"
+        )
         (results_dir / f"task_{task_id:02d}.json").write_text(
             json.dumps(
                 {
                     "task_id": task_id,
                     "damp_factor": float(damp_factor),
-                    "n_iters": n_iters,
+                    "n_iters": mean_iters,
+                    "n_iters_per_seed": n_iters_per_seed,
                     "target": args.target,
                     "step_size": float(args.step_size),
                     "chain_length": int(args.chain_length),
-                    "random_seed": int(args.random_seed),
+                    "random_seed": seeds[0],
+                    "random_seeds": seeds,
                 },
                 indent=2,
             )
@@ -202,9 +262,21 @@ def run_full_sweep(args: argparse.Namespace) -> None:
 
 def _add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--target", default="blr_german_credit")
-    parser.add_argument("--step-size", type=float, default=0.1)
+    parser.add_argument("--step-size", type=float, default=DEFAULT_STEP_SIZE)
     parser.add_argument("--chain-length", type=int, default=200)
-    parser.add_argument("--random-seed", type=int, default=123)
+    parser.add_argument(
+        "--random-seed",
+        type=int,
+        default=123,
+        help="Used when --random-seeds is omitted (single-seed runs).",
+    )
+    parser.add_argument(
+        "--random-seeds",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Average n_iters over these seeds (default: just --random-seed).",
+    )
     parser.add_argument("--initial-state-scale", type=float, default=2.0)
     parser.add_argument("--max-num-doublings", type=int, default=5)
     parser.add_argument(
@@ -212,14 +284,24 @@ def _add_common_args(parser: argparse.ArgumentParser) -> None:
         type=Path,
         default=_EXAMPLES_DIR / "configs" / "deer" / "default.json",
     )
-    parser.add_argument("--results-dir", type=Path, default=DEFAULT_RESULTS_DIR)
-    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument(
+        "--results-dir",
+        type=Path,
+        default=None,
+        help="Task JSON directory (default: .../results/eps_<step-size>).",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help="Plot path (default: <results-dir>/n_iters_vs_damp_factor.png).",
+    )
     parser.add_argument(
         "--damp-factors",
         type=float,
         nargs="+",
         default=None,
-        help="Expected damp factors (plot mode sanity check; full sweep default).",
+        help="Damp factors for full sweep; optional plot-mode sanity check.",
     )
 
 

@@ -1,8 +1,7 @@
 """Run sequential NUTS warmup with BlackJAX window adaptation.
 
 Tunes step size and inverse mass matrix for a target distribution using
-``blackjax.adaptation.window_adaptation``. Writes ``run_config.json`` for direct
-use with ``single_run.slurm`` or ``run_nuts.py``.
+``blackjax.adaptation.window_adaptation``.
 
 Run:
     uv run examples/run_nuts_warmup.py

@@ -2,15 +2,21 @@
 
 # Run a DEER parallel MCMC example by sampler name.
 #
-# Usage (sampler-first):
+# Preferred (named flags; work with sbatch):
+#   sbatch scripts/single_run.slurm --target ill_conditioned_gaussian
+#   sbatch scripts/single_run.slurm --sampler nuts --target banana
+#   sbatch scripts/single_run.slurm --target banana --sampler_config examples/configs/samplers/nuts.json
+#   sbatch scripts/single_run.slurm --target banana --deer_config examples/configs/deer/quasi-undamped.json
+#
+# Usage (sampler-first positional):
 #   sbatch scripts/single_run.slurm nuts
 #   sbatch scripts/single_run.slurm nuts banana
 #   sbatch scripts/single_run.slurm hmc ill_conditioned_gaussian
 #   sbatch scripts/single_run.slurm nuts banana examples/configs/samplers/nuts.json
 #   sbatch scripts/single_run.slurm nuts banana examples/configs/samplers/nuts.json examples/configs/deer/quasi-damped.json
 #
-# Override DEER config via environment when arg 4 is omitted:
-#   DEER_CONFIG=examples/configs/deer/full-damped.json sbatch scripts/single_run.slurm nuts banana
+# Override via environment:
+#   TARGET=ill_conditioned_gaussian DEER_CONFIG=examples/configs/deer/quasi-undamped.json sbatch scripts/single_run.slurm
 #
 # Legacy target-first invocation (defaults to nuts):
 #   sbatch scripts/single_run.slurm banana
@@ -26,8 +32,8 @@
 #SBATCH --time=01:00:00
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1
-#SBATCH --mem=128G
-#SBATCH --gpus-per-task=1
+#SBATCH --mem=32G
+#SBATCH --gpus-per-task=2
 
 set -euo pipefail
 
@@ -98,16 +104,79 @@ resolve_sampler() {
   esac
 }
 
-if [[ $# -ge 1 ]] && is_known_sampler "$1"; then
-  SAMPLER="$1"
-  TARGET="${2:-banana}"
-  SAMPLER_CONFIG="${3:-}"
-  DEER_CONFIG="${4:-${DEER_CONFIG:-examples/configs/deer/default.json}}"
-else
-  SAMPLER="nuts"
-  TARGET="${1:-banana}"
-  SAMPLER_CONFIG="${2:-}"
-  DEER_CONFIG="${3:-${DEER_CONFIG:-examples/configs/deer/default.json}}"
+SAMPLER="${SAMPLER:-nuts}"
+TARGET="${TARGET:-banana}"
+SAMPLER_CONFIG="${SAMPLER_CONFIG:-}"
+DEER_CONFIG="${DEER_CONFIG:-examples/configs/deer/default.json}"
+POSITIONAL=()
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --sampler)
+      if [[ $# -lt 2 ]]; then
+        echo "Missing value for --sampler" >&2
+        exit 1
+      fi
+      SAMPLER="$2"
+      shift 2
+      ;;
+    --target)
+      if [[ $# -lt 2 ]]; then
+        echo "Missing value for --target" >&2
+        exit 1
+      fi
+      TARGET="$2"
+      shift 2
+      ;;
+    --sampler-config|--sampler_config)
+      if [[ $# -lt 2 ]]; then
+        echo "Missing value for --sampler-config" >&2
+        exit 1
+      fi
+      SAMPLER_CONFIG="$2"
+      shift 2
+      ;;
+    --deer-config|--deer_config)
+      if [[ $# -lt 2 ]]; then
+        echo "Missing value for --deer-config" >&2
+        exit 1
+      fi
+      DEER_CONFIG="$2"
+      shift 2
+      ;;
+    --)
+      shift
+      POSITIONAL+=("$@")
+      break
+      ;;
+    -*)
+      echo "Unknown option: $1" >&2
+      exit 1
+      ;;
+    *)
+      POSITIONAL+=("$1")
+      shift
+      ;;
+  esac
+done
+
+if [[ ${#POSITIONAL[@]} -ge 1 ]] && is_known_sampler "${POSITIONAL[0]}"; then
+  SAMPLER="${POSITIONAL[0]}"
+  TARGET="${POSITIONAL[1]:-${TARGET}}"
+  if [[ -z "${SAMPLER_CONFIG}" && ${#POSITIONAL[@]} -ge 3 ]]; then
+    SAMPLER_CONFIG="${POSITIONAL[2]}"
+  fi
+  if [[ ${#POSITIONAL[@]} -ge 4 ]]; then
+    DEER_CONFIG="${POSITIONAL[3]}"
+  fi
+elif [[ ${#POSITIONAL[@]} -ge 1 ]]; then
+  TARGET="${POSITIONAL[0]}"
+  if [[ -z "${SAMPLER_CONFIG}" && ${#POSITIONAL[@]} -ge 2 ]]; then
+    SAMPLER_CONFIG="${POSITIONAL[1]}"
+  fi
+  if [[ ${#POSITIONAL[@]} -ge 3 ]]; then
+    DEER_CONFIG="${POSITIONAL[2]}"
+  fi
 fi
 
 resolve_sampler "${SAMPLER}"

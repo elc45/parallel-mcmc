@@ -1,8 +1,8 @@
 """Run parallel NUTS (BlackJAX No-U-Turn Sampler) with DEER.
 
-Each chain transition is one BlackJAX NUTS kernel step. Produces progress and
-Newton-error plots, a position-convergence GIF, Lyapunov diagnostics, and saved
-``.npy`` arrays.
+Each chain transition is one BlackJAX NUTS kernel step. Produces progress,
+Newton-error and residual plots, a position-convergence GIF, Lyapunov diagnostics,
+and saved ``.npy`` arrays.
 
 Run:
     uv run examples/run_nuts.py
@@ -16,21 +16,14 @@ from pathlib import Path
 import jax
 import jax.numpy as jnp
 import jax.random as jr
-import numpy as np
 from src import samplers
-from src.util import (
-    lyapunov_exponent_by_newton,
-    lyapunov_exponent_sequential,
-    save_lyapunov_results,
-    save_newton_lyapunov_results,
-)
 
 _EXAMPLES_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = _EXAMPLES_DIR.parent
 if str(_EXAMPLES_DIR) not in sys.path:
     sys.path.insert(0, str(_EXAMPLES_DIR))
 
-import plot as hmc_plot
+from run_outputs import lyapunov_config_from_cfg, save_core_deer_outputs, save_lyapunov_outputs
 from config import (
     SAMPLER_CONFIGS_DIR,
     add_run_config_args,
@@ -153,93 +146,42 @@ if __name__ == "__main__":
         target=args.target,
     )
 
-    states_par_np = hmc_plot.trim_newton_trace(states_par, iters)
-    newton_iters = hmc_plot.sample_newton_iterations(iters)
-
-    hmc_plot.progress_plot(
-        states_par_np,
-        states_seq,
-        initial_state,
-        newton_iters,
+    states_par_np, _, _ = save_core_deer_outputs(
+        run_dir,
+        states_par=states_par,
+        states_seq=states_seq,
+        initial_state=initial_state,
+        iters=int(iters),
         chain_length=chain_length,
-        quasi=quasi,
-        savepath=run_dir / "progress.png",
-        suptitle=f"{chain_length} NUTS draws",
-    )
-    hmc_plot.newton_max_error_plot(
-        states_par_np,
-        rtol=rtol,
-        savepath=run_dir / "newton_err.png",
-        title=f"DEER Newton error, NUTS ({target.name})",
-    )
-    hmc_plot.newton_truth_error_plot(
-        states_par_np,
-        states_seq,
         dim=D,
-        savepath=run_dir / "newton_truth_err.png",
-        title=f"Parallel-vs-sequential trajectory error, NUTS ({target.name})",
+        rtol=rtol,
+        tol=tol,
+        quasi=quasi,
+        sampler_label="NUTS",
+        target_name=target.name,
+        progress_suptitle=f"{chain_length} NUTS draws",
     )
 
-    np.save(run_dir / "states_par.npy", states_par_np)
-
-    states_seq_np = np.asarray(jax.device_get(states_seq))
-    np.save(run_dir / "states_seq.npy", states_seq_np)
-
-    print("Creating GIF...")
-    hmc_plot.position_convergence_gif(
-        states_par_np,
-        run_dir / "trace.gif",
-        max_newton_iter=int(iters),
-    )
-
-    if cfg.get("compute_lyapunov", True):
-        lyap_tangent_key = jr.PRNGKey(int(cfg.get("lyapunov_seed", cfg["random_seed"] + 1)))
-        tangent_subspace = cfg.get("lyapunov_tangent", "full")
-        lyap = lyapunov_exponent_sequential(
-            lambda s, d: sampler.nuts_fn_for_deer(s, d, params),
-            initial_state,
-            key,
-            chain_length,
-            lyap_tangent_key,
+    compute_lyap, lyap_tangent_key, tangent_subspace = lyapunov_config_from_cfg(cfg)
+    if compute_lyap:
+        save_lyapunov_outputs(
+            run_dir,
+            sampler_fn=lambda s, d: sampler.nuts_fn_for_deer(s, d, params),
+            states_par_np=states_par_np,
+            y0=initial_state,
+            key=key,
+            chain_length=chain_length,
+            lyap_tangent_key=lyap_tangent_key,
             tangent_subspace=tangent_subspace,
             position_dim=D if tangent_subspace == "position" else None,
-        )
-        save_lyapunov_results(run_dir, lyap)
-        hmc_plot.lyapunov_ftle_plot(
-            lyap["ftle"],
-            run_dir / "lyapunov_ftle.png",
-            lyapunov_exponent=lyap["lyapunov_exponent"],
-            title=f"FTLE, sequential NUTS ({target.name}, tangent={tangent_subspace})",
-        )
-        print(
-            f"Lyapunov exponent: {lyap['lyapunov_exponent']:.4f} "
-            f"(tail: {lyap['lyapunov_exponent_tail']:.4f}, tangent={tangent_subspace})"
-        )
-
-        print("Computing Lyapunov exponent along each Newton trajectory...")
-        lyap_by_newton = lyapunov_exponent_by_newton(
-            lambda s, d: sampler.nuts_fn_for_deer(s, d, params),
-            states_par_np,
-            initial_state,
-            key,
-            lyap_tangent_key,
-            tangent_subspace=tangent_subspace,
-            position_dim=D if tangent_subspace == "position" else None,
-        )
-        save_newton_lyapunov_results(
-            run_dir, lyap_by_newton, tangent_subspace=tangent_subspace
-        )
-        hmc_plot.newton_lyapunov_exponent_plot(
-            lyap_by_newton,
-            run_dir / "lyapunov_exponent_by_newton.png",
-            title=f"Lyapunov exponent vs Newton iter, NUTS ({target.name}, tangent={tangent_subspace})",
-        )
-        print(
-            f"Newton Lyapunov exponent: initial={lyap_by_newton[0]:.4f}, "
-            f"final={lyap_by_newton[-1]:.4f}"
+            sampler_label="NUTS",
+            target_name=target.name,
         )
 
     finalize_run(
         run_dir,
-        message=f"Saved config, plots, states_par.npy, states_seq.npy, GIFs, and Lyapunov outputs under {run_dir}",
+        message=(
+            f"Saved config, plots, states_par.npy, states_seq.npy, GIFs, "
+            f"and Lyapunov outputs under {run_dir}"
+        ),
     )

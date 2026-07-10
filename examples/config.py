@@ -45,12 +45,14 @@ def add_run_config_args(
 
     parser.add_argument(
         "--sampler-config",
+        "--sampler_config",
         type=Path,
         default=sampler_config,
         help=f"Path to sampler JSON config (default: {sampler_config}).",
     )
     parser.add_argument(
         "--deer-config",
+        "--deer_config",
         type=Path,
         default=deer_config,
         help=f"Path to DEER JSON config (default: {deer_config}).",
@@ -63,12 +65,22 @@ def add_run_config_args(
     )
 
 
+_DEER_ONLY_KEYS = frozenset(
+    {"damp_factor", "tol", "rtol", "quasi", "qmem_efficient", "clip_val"}
+)
+
+
 def load_sampler_config(path: Path) -> dict[str, Any]:
     """Load a sampler config file or the ``sampler`` section of ``run_config.json``."""
     data = load_json(path)
     sampler = data.get("sampler")
     if isinstance(sampler, dict):
         return sampler
+    if "chain_length" not in data and set(data.keys()).issubset(_DEER_ONLY_KEYS):
+        raise ValueError(
+            f"{path} looks like a DEER config (missing sampler keys such as "
+            f"chain_length). Pass it with --deer-config / --deer_config instead."
+        )
     return data
 
 
