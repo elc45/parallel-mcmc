@@ -40,7 +40,6 @@ DEFAULT_SAMPLER_CONFIG = SAMPLER_CONFIGS_DIR / "hamiltonian_leapfrog.json"
 DEFAULT_TARGET = "blr_german_credit"
 RUNS_PARENT = _REPO_ROOT / "experiments" / "hamiltonian_leapfrog_runs"
 
-_SHOW_DEER_PROGRESS = __name__ == "__main__"
 
 
 def _next_run_dir(runs_parent: Path) -> Path:
@@ -95,7 +94,6 @@ sampler = samplers.ParallelHamiltonianLeapfrog(
     max_iter,
     full_trace=False,
     damp_factor=damp_factor,
-    show_progress=_SHOW_DEER_PROGRESS,
     tol=tol,
     rtol=rtol,
     quasi=quasi,
@@ -115,7 +113,6 @@ sampler = samplers.ParallelHamiltonianLeapfrog(
     max_iter=max_iter,
     full_trace=full_trace,
     damp_factor=damp_factor,
-    show_progress=_SHOW_DEER_PROGRESS,
     quasi=quasi,
     tol=tol,
     rtol=rtol,

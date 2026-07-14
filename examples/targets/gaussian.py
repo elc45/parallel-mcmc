@@ -62,7 +62,7 @@ def toeplitz_gaussian_10d() -> TargetSpec:
 
 def toeplitz_gaussian_100d() -> TargetSpec:
     """100D zero-mean Gaussian with Toeplitz covariance (rho=0.9)."""
-    return toeplitz_gaussian(ndims=100, rho=0.9, name="toeplitz_gaussian_100d")
+    return toeplitz_gaussian(ndims=1000, rho=0.9, name="toeplitz_gaussian_100d")
 
 def toeplitz_gaussian_10000d() -> TargetSpec:
     """10000D zero-mean Gaussian with Toeplitz covariance (rho=0.9)."""

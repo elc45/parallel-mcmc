@@ -30,7 +30,6 @@ DEFAULT_SAMPLER_CONFIG = SAMPLER_CONFIGS_DIR / "langevin.json"
 DEFAULT_TARGET = "gaussian_2d"
 RUNS_PARENT = _REPO_ROOT / "experiments" / "langevin_runs"
 
-_SHOW_DEER_PROGRESS = __name__ == "__main__"
 
 
 def _next_run_dir(runs_parent: Path) -> Path:
@@ -88,7 +87,6 @@ sampler = samplers.ParallelLangevin(
     max_iter,
     full_trace=False,
     damp_factor=damp_factor,
-    show_progress=_SHOW_DEER_PROGRESS,
     tol=tol,
     rtol=rtol,
     quasi=quasi,
@@ -108,7 +106,6 @@ sampler = samplers.ParallelLangevin(
     max_iter=max_iter,
     full_trace=full_trace,
     damp_factor=damp_factor,
-    show_progress=_SHOW_DEER_PROGRESS,
     quasi=quasi,
     tol=tol,
     rtol=rtol,

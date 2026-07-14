@@ -290,7 +290,6 @@ class ParallelHMC:
     damp_factor: float
     full_trace: bool
     basis_transformation: bool
-    show_progress: bool
     tol: float | None
     rtol: float | None
     adaptive_mass: Literal["grad", "draw-only"] | None
@@ -312,7 +311,6 @@ class ParallelHMC:
                 damp_factor: float = 1.0, 
                 full_trace: bool = False, 
                 basis_transformation: bool = False,
-                show_progress: bool = False, 
                 tol: float | None = None, 
                 rtol: float | None = None,
                 adaptive_mass: str | bool | None = None,
@@ -340,8 +338,6 @@ class ParallelHMC:
             full_trace         - if True, return the full per-iteration trace of parallel states
                                  rather than only the converged chain (default False).
             basis_transformation - unused in HMC; reserved for API parity with ParallelMALA.
-            show_progress      - if True, emit a progress callback via jax.debug during the
-                                 parallel solve (default False).
             tol                - absolute residual tolerance for DEER early stopping
                                  (None = dtype default in deer.seq1d).
             rtol               - relative residual tolerance for DEER early stopping
@@ -387,7 +383,6 @@ class ParallelHMC:
         self.damp_factor = damp_factor
         self.full_trace = full_trace 
         self.basis_transformation = basis_transformation
-        self.show_progress = show_progress
         self.tol = tol
         self.rtol = rtol
         self.adaptive_mass = _normalize_adaptive_mass(adaptive_mass)
@@ -803,7 +798,6 @@ class ParallelHMC:
             clip_val=self.clip_val,
             full_trace=self.full_trace, 
             damp_factor=self.damp_factor,
-            show_progress=self.show_progress,
             tol=self.tol,
             rtol=self.rtol,
         )
@@ -1011,7 +1005,6 @@ class ParallelMCLMC:
         clip_val: float = 1.0,
         damp_factor: float = 1.0,
         full_trace: bool = False,
-        show_progress: bool = False,
         tol: float | None = None,
         rtol: float | None = None,
         inverse_mass_matrix=1.0,
@@ -1033,7 +1026,6 @@ class ParallelMCLMC:
         self.clip_val = clip_val
         self.damp_factor = damp_factor
         self.full_trace = full_trace
-        self.show_progress = show_progress
         self.tol = tol
         self.rtol = rtol
         self.inverse_mass_matrix = inverse_mass_matrix
@@ -1116,7 +1108,6 @@ class ParallelMCLMC:
             clip_val=self.clip_val,
             full_trace=self.full_trace,
             damp_factor=self.damp_factor,
-            show_progress=self.show_progress,
             tol=self.tol,
             rtol=self.rtol,
         )
@@ -1142,7 +1133,6 @@ class ParallelHamiltonianLeapfrog:
         clip_val: float = 1.0,
         damp_factor: float = 1.0,
         full_trace: bool = False,
-        show_progress: bool = False,
         tol: float | None = None,
         rtol: float | None = None,
         inverse_mass_matrix=1.0,
@@ -1162,7 +1152,6 @@ class ParallelHamiltonianLeapfrog:
         self.clip_val = clip_val
         self.damp_factor = damp_factor
         self.full_trace = full_trace
-        self.show_progress = show_progress
         self.tol = tol
         self.rtol = rtol
         self.inverse_mass_matrix = inverse_mass_matrix
@@ -1248,7 +1237,6 @@ class ParallelHamiltonianLeapfrog:
             clip_val=self.clip_val,
             full_trace=self.full_trace,
             damp_factor=self.damp_factor,
-            show_progress=self.show_progress,
             tol=self.tol,
             rtol=self.rtol,
         )
@@ -1274,7 +1262,6 @@ class ParallelMicrocanonical:
         clip_val: float = 1.0,
         damp_factor: float = 1.0,
         full_trace: bool = False,
-        show_progress: bool = False,
         tol: float | None = None,
         rtol: float | None = None,
         inverse_mass_matrix=1.0,
@@ -1296,7 +1283,6 @@ class ParallelMicrocanonical:
         self.clip_val = clip_val
         self.damp_factor = damp_factor
         self.full_trace = full_trace
-        self.show_progress = show_progress
         self.tol = tol
         self.rtol = rtol
         self.inverse_mass_matrix = inverse_mass_matrix
@@ -1380,7 +1366,6 @@ class ParallelMicrocanonical:
             clip_val=self.clip_val,
             full_trace=self.full_trace,
             damp_factor=self.damp_factor,
-            show_progress=self.show_progress,
             tol=self.tol,
             rtol=self.rtol,
         )
@@ -1435,7 +1420,6 @@ class ParallelLangevin:
         clip_val: float = 1.0,
         damp_factor: float = 1.0,
         full_trace: bool = False,
-        show_progress: bool = False,
         tol: float | None = None,
         rtol: float | None = None,
         inverse_mass_matrix=1.0,
@@ -1455,7 +1439,6 @@ class ParallelLangevin:
         self.clip_val = clip_val
         self.damp_factor = damp_factor
         self.full_trace = full_trace
-        self.show_progress = show_progress
         self.tol = tol
         self.rtol = rtol
         self.inverse_mass_matrix = inverse_mass_matrix
@@ -1542,7 +1525,6 @@ class ParallelLangevin:
             clip_val=self.clip_val,
             full_trace=self.full_trace,
             damp_factor=self.damp_factor,
-            show_progress=self.show_progress,
             tol=self.tol,
             rtol=self.rtol,
         )
@@ -1586,7 +1568,6 @@ class ParallelNUTS:
         clip_val: float = 1.0,
         damp_factor: float = 1.0,
         full_trace: bool = False,
-        show_progress: bool = False,
         tol: float | None = None,
         rtol: float | None = None,
         inverse_mass_matrix=1.0,
@@ -1606,7 +1587,6 @@ class ParallelNUTS:
         self.clip_val = clip_val
         self.damp_factor = damp_factor
         self.full_trace = full_trace
-        self.show_progress = show_progress
         self.tol = tol
         self.rtol = rtol
         self.max_num_doublings = int(max_num_doublings)
@@ -1683,7 +1663,6 @@ class ParallelNUTS:
             clip_val=self.clip_val,
             full_trace=self.full_trace,
             damp_factor=self.damp_factor,
-            show_progress=self.show_progress,
             tol=self.tol,
             rtol=self.rtol,
         )

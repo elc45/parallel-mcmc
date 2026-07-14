@@ -48,7 +48,6 @@ DEFAULT_SAMPLER_CONFIG = SAMPLER_CONFIGS_DIR / "nuts.json"
 DEFAULT_TARGET = "banana"
 RUNS_PARENT = _REPO_ROOT / "experiments" / "nuts" / "individual_runs"
 
-_SHOW_DEER_PROGRESS = __name__ == "__main__"
 
 
 def _parse_args() -> argparse.Namespace:
@@ -101,7 +100,6 @@ sampler = samplers.ParallelNUTS(
     max_iter,
     full_trace=False,
     damp_factor=damp_factor,
-    show_progress=_SHOW_DEER_PROGRESS,
     tol=tol,
     rtol=rtol,
     quasi=quasi,
@@ -127,7 +125,6 @@ sampler = samplers.ParallelNUTS(
     max_iter=max_iter,
     full_trace=full_trace,
     damp_factor=damp_factor,
-    show_progress=_SHOW_DEER_PROGRESS,
     quasi=quasi,
     tol=tol,
     rtol=rtol,

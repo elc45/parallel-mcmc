@@ -26,7 +26,6 @@ dependencies = [
   "matplotlib",
   "imageio",
   "jaxtyping",
-  "tqdm",
   "tf-keras>=2.16.0",
   "blackjax==1.2.5",
   "optax==0.2.2",

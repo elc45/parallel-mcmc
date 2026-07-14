@@ -51,7 +51,6 @@ DEFAULT_SAMPLER_CONFIG = SAMPLER_CONFIGS_DIR / "mala.json"
 DEFAULT_TARGET = "gaussian_2d"
 RUNS_PARENT = _REPO_ROOT / "experiments" / "mala" / "runs"
 
-_SHOW_DEER_PROGRESS = __name__ == "__main__"
 
 
 def _parse_args() -> argparse.Namespace:
@@ -110,7 +109,6 @@ sampler = samplers.ParallelMALA(
     max_iter,
     full_trace=False,
     damp_factor=damp_factor,
-    show_progress=_SHOW_DEER_PROGRESS,
     tol=tol,
     rtol=rtol,
     adaptive_mass=adaptive_mass,
@@ -150,7 +148,6 @@ sampler = samplers.ParallelMALA(
     max_iter=max_iter,
     full_trace=full_trace,
     damp_factor=damp_factor,
-    show_progress=_SHOW_DEER_PROGRESS,
     quasi=quasi,
     tol=tol,
     rtol=rtol,

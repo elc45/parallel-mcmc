@@ -90,7 +90,6 @@ def _run_parallel_iters(
         chain_length,
         full_trace=False,
         damp_factor=damp_factor,
-        show_progress=False,
         tol=deer["tol"],
         rtol=deer["rtol"],
         quasi=deer["quasi"],

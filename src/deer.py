@@ -11,38 +11,6 @@ from typing import Callable, Any, Tuple, Optional
 import jax
 import jax.numpy as jnp
 import jax.random as jr
-import numpy as np
-
-
-def _make_seq1d_progress_callback(
-    max_iter: int, desc: str
-) -> Tuple[Callable[[Any], None], Callable[[Any], None]]:
-    """Host-side tqdm for ``jax.lax.while_loop`` Newton iters via ``jax.debug.callback``.
-
-    Returns (on_step, on_close). ``on_close`` must run after the loop (ordered callback)
-    so the bar finishes before host code runs (avoids a duplicate tqdm line after e.g. ``print``).
-    """
-    from tqdm import tqdm
-    import sys
-
-    pbar = tqdm(
-        total=max_iter,
-        desc=desc,
-        unit="iter",
-        file=sys.stderr,
-        dynamic_ncols=True,
-        mininterval=0.05,
-    )
-
-    def _on_step(step) -> None:
-        s = int(np.asarray(step).item())
-        pbar.n = min(s, max_iter)
-        pbar.refresh()
-
-    def _on_close(_token) -> None:
-        pbar.close()
-
-    return _on_step, _on_close
 
 
 def seq1d(
@@ -59,7 +27,6 @@ def seq1d(
     damp_factor: float=1.0, # Damping 
     preconditioner: Any=None, # Diagonal preconditioner,
     clip_val: float=1e8,
-    show_progress: bool = False,
     tol: Optional[float] = None,
     rtol: Optional[float] = None,
 ):
@@ -95,8 +62,6 @@ def seq1d(
     full_trace: bool
         If True, return the full trace of all the Newton iterates for a fixed specification of max_iter (uses a scan)
         if False, return only the final iterate (uses a jax.lax.while_loop)
-    show_progress: bool
-        If True and ``full_trace`` is False, report Newton iteration progress on stderr (tqdm) during execution.
     tol: float or None
         Absolute tolerance for Newton early stopping (``err > tol``). If None, uses dtype defaults in the solver.
     rtol: float or None
@@ -141,7 +106,6 @@ def seq1d(
             damp_factor=damp_factor,
             preconditioner=preconditioner,
             clip_val=clip_val,
-            show_progress=show_progress,
             tol=tol,
             rtol=rtol,
         )
@@ -162,7 +126,6 @@ def seq1d(
             damp_factor=damp_factor,
             preconditioner=preconditioner,
             clip_val=clip_val,
-            show_progress=show_progress,
             tol=tol,
             rtol=rtol,
         )
@@ -188,7 +151,6 @@ def deer_iteration(
     damp_factor: float=1.0, # Damping 
     preconditioner: Any=None, # Diagonal preconditioner
     clip_val: float=1e8,
-    show_progress: bool = False,
     tol: Optional[float] = None,
     rtol: Optional[float] = None,
 ) -> jnp.ndarray:
@@ -208,7 +170,6 @@ def deer_iteration(
         damp_factor=damp_factor,
         preconditioner=preconditioner, 
         clip_val=clip_val,
-        show_progress=show_progress,
         tol=tol,
         rtol=rtol,
     )
@@ -231,17 +192,9 @@ def deer_iteration_helper(
     damp_factor: float=1.0, # Damping 
     preconditioner: Any=None, # Diagonal preconditioner for Quasi
     clip_val: float=1e8,
-    show_progress: bool = False,
     tol: Optional[float] = None,
     rtol: Optional[float] = None,
 ) -> Tuple[jnp.ndarray, Optional[jnp.ndarray], Callable]:
-
-    progress_cb = None
-    progress_close = None
-    if show_progress and not full_trace:
-        progress_cb, progress_close = _make_seq1d_progress_callback(
-            max_iter, "DEER seq1d Newton"
-        )
 
     jacfunc = jax.vmap(jax.jacfwd(func, argnums=0), in_axes=(0, 0, None))
     func2 = jax.vmap(func, in_axes=(0, 0, None))
@@ -271,10 +224,7 @@ def deer_iteration_helper(
 
         err = jnp.max(jnp.abs(Y_i_next - Y_i) - rtol_effective * jnp.abs(Y_i))
 
-        next_iiter = iiter + 1
-        if progress_cb is not None:
-            jax.debug.callback(progress_cb, next_iiter, ordered=True)
-        return err, Y_i_next, gt, next_iiter
+        return err, Y_i_next, gt, iiter + 1
 
     def scan_func(iter_inp, args):
         err, Y_i, gt_, iiter, converged, conv_iter = iter_inp
@@ -330,8 +280,6 @@ def deer_iteration_helper(
         _, Y_i, gt, samp_iters = jax.lax.while_loop(
             cond_func, iter_func, (err, init_trajectory_guess, gt, iiter)
         )
-    if progress_close is not None:
-        jax.debug.callback(progress_close, samp_iters, ordered=True)
     rhs = jnp.zeros_like(gt[..., 0])  # (T, D)
     if memory_efficient:
         gt = None
@@ -515,17 +463,10 @@ def diagonal_deer_iteration(
     damp_factor: float=1.0, # Damping 
     preconditioner: Any=None, # Diagonal preconditioner
     clip_val: float=1e8,
-    show_progress: bool = False,
     tol: Optional[float] = None,
     rtol: Optional[float] = None,
 ) -> Tuple[jnp.ndarray, Optional[jnp.ndarray], Callable]:
     inv_lin_params = (init,)
-    progress_cb = None
-    progress_close = None
-    if show_progress and not full_trace:
-        progress_cb, progress_close = _make_seq1d_progress_callback(
-            max_iter, "DEER seq1d Newton (quasi)"
-        )
 
     jacfunc = jax.vmap(
         jax.jacfwd(func, argnums=0), in_axes=(0, 0, None)
@@ -536,7 +477,9 @@ def diagonal_deer_iteration(
     if qmem_efficient:
         def deer_jvp(z, driver, params, v):
             return jax.jvp(lambda z : func(z, driver, params), (z,), (v, ))[1]
-        keys = jr.split(params['key'], (xinput.shape[0]))
+        # xinput can be an array or a pytree of arrays (e.g. NUTS drivers);
+        # chain length is always the leading axis of the trajectory guess.
+        keys = jr.split(params['key'], (init_trajectory_guess.shape[0],))
 
     func2 = jax.vmap(func, in_axes=(0, 0, None))
 
@@ -575,10 +518,7 @@ def diagonal_deer_iteration(
 
         err = jnp.max( jnp.abs(yt_next - yt) - rtol_effective * jnp.abs(yt) )
 
-        next_iiter = iiter + 1
-        if progress_cb is not None:
-            jax.debug.callback(progress_cb, next_iiter, ordered=True)
-        return err, yt_next, gt, next_iiter
+        return err, yt_next, gt, iiter + 1
 
     def scan_func(iter_inp, args):
         err, yt, gt_, iiter, converged, conv_iter = iter_inp
@@ -644,8 +584,6 @@ def diagonal_deer_iteration(
         _, yt, gt, samp_iters = jax.lax.while_loop(
             cond_func, iter_func, (err, init_trajectory_guess, gt, iiter)
         )
-    if progress_close is not None:
-        jax.debug.callback(progress_close, samp_iters, ordered=True)
     rhs = jnp.zeros_like(gt)  # (nsamples, ny)
     if memory_efficient:
         gt = None
