@@ -6,11 +6,23 @@ Licensed under the BSD 3-Clause License (see LICENSE file for details).
 
 Modifications for benchmarking and quasi-DEER by Xavier Gonzalez (2024). """
 
-from typing import Callable, Any, Tuple, Optional
+from typing import Callable, Any, Tuple, Optional, NamedTuple
 
 import jax
 import jax.numpy as jnp
 import jax.random as jr
+
+
+class NewtonHistories(NamedTuple):
+    """Scalar Newton diagnostics collected without storing full state traces.
+
+    ``newton_err`` has length ``max_iter`` (valid prefix ``[:samp_iters]``).
+    ``residual_sq`` has length ``max_iter + 1`` (valid prefix ``[:samp_iters + 1]``),
+    where index ``0`` is the initial guess (matching ``full_trace=True`` layout).
+    """
+
+    newton_err: jnp.ndarray
+    residual_sq: jnp.ndarray
 
 
 def seq1d(
@@ -70,8 +82,13 @@ def seq1d(
     Returns
     -------
     y: jnp.ndarray
-        The output signal as the solution of the discrete difference equation (T, D),
-        excluding the initial states.
+        With ``full_trace=False``: final trajectory ``(T, D)``.
+        With ``full_trace=True``: Newton trace ``(max_iter + 1, T, D)`` including the initial guess.
+    samp_iters: jnp.ndarray
+        Number of Newton iterations performed (or first-converged index for ``full_trace=True``).
+    newton_hist: NewtonHistories or None
+        With ``full_trace=False``: per-iteration Newton error and fixed-point residual scalars.
+        With ``full_trace=True``: ``None`` (reconstruct from the returned state trace instead).
     """
     # set the default initial guess
     xinp_flat = jax.tree_util.tree_flatten(xinp)[0][0]
@@ -89,7 +106,7 @@ def seq1d(
         return y
 
     if quasi:
-        yt, _, _, _, samp_iters = diagonal_deer_iteration(
+        yt, _, _, _, samp_iters, newton_hist = diagonal_deer_iteration(
             inv_lin=diagonal_seq1d_inv_lin,
             func=func,
             shifter_func=shifter_func,
@@ -110,7 +127,7 @@ def seq1d(
             rtol=rtol,
         )
     else:
-        yt, samp_iters = deer_iteration(
+        yt, samp_iters, newton_hist = deer_iteration(
             inv_lin=seq1d_inv_lin,
             func=func,
             shifter_func=shifter_func,
@@ -130,9 +147,9 @@ def seq1d(
             rtol=rtol,
         )
     if full_trace:
-        return (jnp.vstack((init_trajectory_guess[None, ...], yt)), samp_iters)
+        return (jnp.vstack((init_trajectory_guess[None, ...], yt)), samp_iters, None)
     else:
-        return (yt, samp_iters)
+        return (yt, samp_iters, newton_hist)
 
 
 def deer_iteration(
@@ -153,8 +170,8 @@ def deer_iteration(
     clip_val: float=1e8,
     tol: Optional[float] = None,
     rtol: Optional[float] = None,
-) -> jnp.ndarray:
-    yt, _, _, _, samp_iters = deer_iteration_helper(
+) -> Tuple[jnp.ndarray, jnp.ndarray, Optional[NewtonHistories]]:
+    yt, _, _, _, samp_iters, newton_hist = deer_iteration_helper(
         inv_lin=inv_lin,
         func=func,
         shifter_func=shifter_func,
@@ -173,7 +190,7 @@ def deer_iteration(
         tol=tol,
         rtol=rtol,
     )
-    return (yt, samp_iters)
+    return (yt, samp_iters, newton_hist)
 
 
 def deer_iteration_helper(
@@ -194,7 +211,7 @@ def deer_iteration_helper(
     clip_val: float=1e8,
     tol: Optional[float] = None,
     rtol: Optional[float] = None,
-) -> Tuple[jnp.ndarray, Optional[jnp.ndarray], Callable]:
+) -> Tuple[jnp.ndarray, Optional[jnp.ndarray], jnp.ndarray, Callable, jnp.ndarray, Optional[NewtonHistories]]:
 
     jacfunc = jax.vmap(jax.jacfwd(func, argnums=0), in_axes=(0, 0, None))
     func2 = jax.vmap(func, in_axes=(0, 0, None))
@@ -205,16 +222,14 @@ def deer_iteration_helper(
     tol_effective = default_tol if tol is None else tol
     rtol_effective = default_rtol if rtol is None else rtol
 
-    def iter_func(
-        iter_inp: Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]
-    ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-        err, Y_i, gt_, iiter = iter_inp
+    def iter_func(iter_inp):
+        err, Y_i, gt_, iiter, err_hist, res_hist = iter_inp
         # Y_i: (T, D) — full trajectory at Newton iterate i
         Y_i_shifted = shifter_func(Y_i, shifter_func_params)
         gt = -jnp.clip(damp_factor * jacfunc(Y_i_shifted, xinput, params), -clip_val, clip_val)
-        # rhs: (T, D)
-        rhs = func2(Y_i_shifted, xinput, params)
-        rhs += jnp.einsum("...ij,...j->...i", gt, Y_i_shifted)
+        f_vals = func2(Y_i_shifted, xinput, params)
+        res_hist = res_hist.at[iiter].set(jnp.sum(jnp.square(Y_i - f_vals)))
+        rhs = f_vals + jnp.einsum("...ij,...j->...i", gt, Y_i_shifted)
         Y_i_next = inv_lin(gt, rhs, inv_lin_params)  # (T, D)
 
         if clip_ytnext:
@@ -223,8 +238,9 @@ def deer_iteration_helper(
             Y_i_next = jnp.where(jnp.isnan(Y_i_next), 0.0, Y_i_next)
 
         err = jnp.max(jnp.abs(Y_i_next - Y_i) - rtol_effective * jnp.abs(Y_i))
+        err_hist = err_hist.at[iiter].set(err)
 
-        return err, Y_i_next, gt, iiter + 1
+        return err, Y_i_next, gt, iiter + 1, err_hist, res_hist
 
     def scan_func(iter_inp, args):
         err, Y_i, gt_, iiter, converged, conv_iter = iter_inp
@@ -254,10 +270,8 @@ def deer_iteration_helper(
         new_carry = err_new, Y_i_next, gt_new, iiter + 1, converged_new, conv_iter_new
         return new_carry, Y_i_next
 
-    def cond_func(
-        iter_inp: Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]
-    ) -> bool:
-        err, _, _, iiter = iter_inp
+    def cond_func(iter_inp) -> bool:
+        err, _, _, iiter, _, _ = iter_inp
         return jnp.logical_and(err > tol_effective, iiter < max_iter)
 
     err = jnp.array(1e10, dtype=dtype)  # initial error should be very high
@@ -267,6 +281,7 @@ def deer_iteration_helper(
     )
 
     iiter = jnp.array(0, dtype=jnp.int32)
+    newton_hist: Optional[NewtonHistories] = None
     if full_trace:
         converged_init = jnp.array(False)
         conv_iter_init = jnp.array(max_iter, dtype=jnp.int32)
@@ -277,13 +292,21 @@ def deer_iteration_helper(
             length=max_iter,
         )
     else:
-        _, Y_i, gt, samp_iters = jax.lax.while_loop(
-            cond_func, iter_func, (err, init_trajectory_guess, gt, iiter)
+        err_hist = jnp.zeros((max_iter,), dtype=dtype)
+        res_hist = jnp.zeros((max_iter + 1,), dtype=dtype)
+        _, Y_i, gt, samp_iters, err_hist, res_hist = jax.lax.while_loop(
+            cond_func,
+            iter_func,
+            (err, init_trajectory_guess, gt, iiter, err_hist, res_hist),
         )
+        Y_final_shifted = shifter_func(Y_i, shifter_func_params)
+        res_final = jnp.sum(jnp.square(Y_i - func2(Y_final_shifted, xinput, params)))
+        res_hist = res_hist.at[samp_iters].set(res_final)
+        newton_hist = NewtonHistories(newton_err=err_hist, residual_sq=res_hist)
     rhs = jnp.zeros_like(gt[..., 0])  # (T, D)
     if memory_efficient:
         gt = None
-    return Y_i, gt, rhs, func, samp_iters
+    return Y_i, gt, rhs, func, samp_iters, newton_hist
 
 
 def binary_operator(
@@ -465,7 +488,7 @@ def diagonal_deer_iteration(
     clip_val: float=1e8,
     tol: Optional[float] = None,
     rtol: Optional[float] = None,
-) -> Tuple[jnp.ndarray, Optional[jnp.ndarray], Callable]:
+) -> Tuple[jnp.ndarray, Optional[jnp.ndarray], jnp.ndarray, Callable, jnp.ndarray, Optional[NewtonHistories]]:
     inv_lin_params = (init,)
 
     jacfunc = jax.vmap(
@@ -489,10 +512,8 @@ def diagonal_deer_iteration(
     tol_effective = default_tol if tol is None else tol
     rtol_effective = default_rtol if rtol is None else rtol
 
-    def iter_func(
-        iter_inp: Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]
-    ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-        err, yt, gt_, iiter = iter_inp
+    def iter_func(iter_inp):
+        err, yt, gt_, iiter, err_hist, res_hist = iter_inp
         # yt: (nsamples, ny)
         ytparams = shifter_func(yt, shifter_func_params)
         if qmem_efficient:
@@ -506,9 +527,9 @@ def diagonal_deer_iteration(
                 damp_factor / precond[None,:] * jax.vmap(jnp.diag)(jacfunc(ytparams, xinput, params)),
                 -clip_val, clip_val,
             )
-        # rhs: (nsamples, ny)
-        rhs = func2(ytparams, xinput, params)
-        rhs += gt * ytparams
+        f_vals = func2(ytparams, xinput, params)
+        res_hist = res_hist.at[iiter].set(jnp.sum(jnp.square(yt - f_vals)))
+        rhs = f_vals + gt * ytparams
         yt_next = inv_lin(gt, rhs, inv_lin_params)  # (nsamples, ny)
 
         if clip_ytnext:
@@ -517,8 +538,9 @@ def diagonal_deer_iteration(
             yt_next = jnp.where(jnp.isnan(yt_next), 0.0, yt_next)
 
         err = jnp.max( jnp.abs(yt_next - yt) - rtol_effective * jnp.abs(yt) )
+        err_hist = err_hist.at[iiter].set(err)
 
-        return err, yt_next, gt, iiter + 1
+        return err, yt_next, gt, iiter + 1, err_hist, res_hist
 
     def scan_func(iter_inp, args):
         err, yt, gt_, iiter, converged, conv_iter = iter_inp
@@ -559,10 +581,8 @@ def diagonal_deer_iteration(
         new_carry = err_new, yt_next, gt_new, iiter + 1, converged_new, conv_iter_new
         return new_carry, yt_next
 
-    def cond_func(
-        iter_inp: Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]
-    ) -> bool:
-        err, _, _, iiter = iter_inp
+    def cond_func(iter_inp) -> bool:
+        err, _, _, iiter, _, _ = iter_inp
         return jnp.logical_and(err > tol_effective, iiter < max_iter)
 
     err = jnp.array(1e10, dtype=dtype)  # initial error should be very high
@@ -571,6 +591,7 @@ def diagonal_deer_iteration(
         dtype=dtype,
     )
     iiter = jnp.array(0, dtype=jnp.int32)
+    newton_hist: Optional[NewtonHistories] = None
     if full_trace:
         converged_init = jnp.array(False)
         conv_iter_init = jnp.array(max_iter, dtype=jnp.int32)
@@ -581,13 +602,21 @@ def diagonal_deer_iteration(
             length=max_iter,
         )
     else:
-        _, yt, gt, samp_iters = jax.lax.while_loop(
-            cond_func, iter_func, (err, init_trajectory_guess, gt, iiter)
+        err_hist = jnp.zeros((max_iter,), dtype=dtype)
+        res_hist = jnp.zeros((max_iter + 1,), dtype=dtype)
+        _, yt, gt, samp_iters, err_hist, res_hist = jax.lax.while_loop(
+            cond_func,
+            iter_func,
+            (err, init_trajectory_guess, gt, iiter, err_hist, res_hist),
         )
+        ytparams_final = shifter_func(yt, shifter_func_params)
+        res_final = jnp.sum(jnp.square(yt - func2(ytparams_final, xinput, params)))
+        res_hist = res_hist.at[samp_iters].set(res_final)
+        newton_hist = NewtonHistories(newton_err=err_hist, residual_sq=res_hist)
     rhs = jnp.zeros_like(gt)  # (nsamples, ny)
     if memory_efficient:
         gt = None
-    return yt, gt, rhs, func, samp_iters
+    return yt, gt, rhs, func, samp_iters, newton_hist
 
 def quasi_diag_estimator(state, inputs, params, deer_jvp, key, num_samples=1):
     z_rad = jr.rademacher(key, (num_samples, state.shape[0])).astype(float)

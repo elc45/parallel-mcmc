@@ -786,7 +786,7 @@ class ParallelHMC:
             if init_trajectory_guess.shape[-1] == self.D:
                 init_trajectory_guess = self._pack_init_trajectory_guess(init_trajectory_guess)
 
-        out_states, iters = deer.seq1d(
+        out_states, iters, newton_hist = deer.seq1d(
             func=self.hmc_fn_for_deer, 
             y0=y0, 
             xinp=drivers, 
@@ -807,7 +807,7 @@ class ParallelHMC:
         #     if self.adaptive_mass
         #     else out_states
         # ), iters
-        return out_states, iters
+        return out_states, iters, newton_hist
 
 
 class ParallelMALA(ParallelHMC):
@@ -1096,7 +1096,7 @@ class ParallelMCLMC:
                     init_trajectory_guess
                 )
 
-        out_states, iters = deer.seq1d(
+        out_states, iters, newton_hist = deer.seq1d(
             func=self.mclmc_fn_for_deer,
             y0=y0,
             xinp=drivers,
@@ -1111,7 +1111,7 @@ class ParallelMCLMC:
             tol=self.tol,
             rtol=self.rtol,
         )
-        return out_states, iters
+        return out_states, iters, newton_hist
 
 
 class ParallelHamiltonianLeapfrog:
@@ -1225,7 +1225,7 @@ class ParallelHamiltonianLeapfrog:
                     init_trajectory_guess
                 )
 
-        out_states, iters = deer.seq1d(
+        out_states, iters, newton_hist = deer.seq1d(
             func=self.hamiltonian_leapfrog_fn_for_deer,
             y0=y0,
             xinp=drivers,
@@ -1240,7 +1240,7 @@ class ParallelHamiltonianLeapfrog:
             tol=self.tol,
             rtol=self.rtol,
         )
-        return out_states, iters
+        return out_states, iters, newton_hist
 
 
 class ParallelMicrocanonical:
@@ -1354,7 +1354,7 @@ class ParallelMicrocanonical:
                     init_trajectory_guess
                 )
 
-        out_states, iters = deer.seq1d(
+        out_states, iters, newton_hist = deer.seq1d(
             func=self.microcanonical_fn_for_deer,
             y0=y0,
             xinp=drivers,
@@ -1369,7 +1369,7 @@ class ParallelMicrocanonical:
             tol=self.tol,
             rtol=self.rtol,
         )
-        return out_states, iters
+        return out_states, iters, newton_hist
 
 
 def _partially_refresh_gaussian_momentum(
@@ -1513,7 +1513,7 @@ class ParallelLangevin:
                     init_trajectory_guess
                 )
 
-        out_states, iters = deer.seq1d(
+        out_states, iters, newton_hist = deer.seq1d(
             func=self.langevin_fn_for_deer,
             y0=y0,
             xinp=drivers,
@@ -1528,7 +1528,7 @@ class ParallelLangevin:
             tol=self.tol,
             rtol=self.rtol,
         )
-        return out_states, iters
+        return out_states, iters, newton_hist
 
 
 def _patch_jnp_clip_max_keyword() -> None:
@@ -1651,7 +1651,7 @@ class ParallelNUTS:
         drivers = (jr.split(key, (self.chain_length,)), jnp.arange(self.chain_length))
         y0 = initial_state
 
-        out_states, iters = deer.seq1d(
+        out_states, iters, newton_hist = deer.seq1d(
             func=self.nuts_fn_for_deer,
             y0=y0,
             xinp=drivers,
@@ -1666,4 +1666,4 @@ class ParallelNUTS:
             tol=self.tol,
             rtol=self.rtol,
         )
-        return out_states, iters
+        return out_states, iters, newton_hist

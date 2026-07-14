@@ -217,9 +217,22 @@ def newton_fixed_point_residual_sq(
     )
 
 
+def trim_newton_histories(
+    newton_err: jnp.ndarray | np.ndarray,
+    residual_sq: jnp.ndarray | np.ndarray,
+    converged_iters: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Trim DEER while-loop diagnostic buffers through convergence."""
+    err = _to_numpy(newton_err)
+    res = _to_numpy(residual_sq)
+    k = int(converged_iters)
+    return err[:k], res[: k + 1]
+
+
 def newton_max_error_plot(
-    states_par: jnp.ndarray | np.ndarray,
+    states_par: jnp.ndarray | np.ndarray | None = None,
     *,
+    errors: jnp.ndarray | np.ndarray | None = None,
     rtol: float | None = None,
     newton_iterations_start_at: int = 1,
     figsize: tuple[float, float] = (7.0, 4.0),
@@ -230,9 +243,15 @@ def newton_max_error_plot(
     """Line plot: Newton iteration vs maximum DEER-style error at that step.
 
     The x-axis counts Newton iterations ``newton_iterations_start_at, ...`` aligned with
-    transitions ``states_par[k-1] -> states_par[k]``.
+    transitions ``states_par[k-1] -> states_par[k]``. Pass either ``states_par`` (full Newton
+    trace) or a precomputed ``errors`` array (e.g. from ``full_trace=False`` histories).
     """
-    errors = newton_max_errors(states_par, rtol=rtol)
+    if errors is None:
+        if states_par is None:
+            raise ValueError("Provide states_par or errors")
+        errors = newton_max_errors(states_par, rtol=rtol)
+    else:
+        errors = _to_numpy(errors)
     iters = np.arange(errors.shape[0], dtype=np.int32) + int(newton_iterations_start_at)
 
     created_fig = ax is None

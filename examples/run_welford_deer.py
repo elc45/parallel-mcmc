@@ -106,7 +106,7 @@ def run_once(T: int, true_var: float, true_mean: float, seed: int, quasi: bool,
 
     # DEER with full trace so we can watch per-iteration convergence.
     init_guess = jnp.zeros((T, 2), dtype=samples.dtype)
-    trace, conv_iter = seq1d(
+    trace, conv_iter, _ = seq1d(
         welford_step,
         y0,
         drivers,

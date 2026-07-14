@@ -123,7 +123,7 @@ sampler = samplers.ParallelHamiltonianLeapfrog(
 trace_label = "full Newton trace" if full_trace else "final trajectory only"
 print(f"Running parallel Hamiltonian leapfrog ({trace_label})")
 run_parallel = jax.jit(sampler.run_parallel_hamiltonian_leapfrog)
-states_par_packed, iters = run_parallel(
+states_par_packed, iters, newton_hist = run_parallel(
     key, initial_state, init_trajectory_guess, params
 )
 print(f"DEER converged in {int(iters)} / {max_iter} Newton iterations")
@@ -146,6 +146,7 @@ if __name__ == "__main__":
         states_seq=states_seq,
         initial_state=initial_state,
         iters=int(iters),
+        newton_hist=newton_hist,
         chain_length=chain_length,
         dim=D,
         rtol=rtol,

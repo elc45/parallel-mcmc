@@ -74,11 +74,15 @@ def save_core_deer_outputs(
     deer_y0: jnp.ndarray | np.ndarray | None = None,
     deer_params: Any = None,
     deer_states_par: jnp.ndarray | np.ndarray | None = None,
+    newton_hist: Any | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
     """Save standard DEER diagnostics: plots, arrays, and optional adaptive-mass outputs.
 
     Returns ``(states_par_np, states_seq_np, mass_seq)`` where ``mass_seq`` is ``None`` when
     adaptive mass is disabled.
+
+    When ``full_trace=False``, pass ``newton_hist`` (``NewtonHistories`` from ``deer.seq1d``)
+    to still write ``newton_err.png`` and ``newton_residual.png`` from on-the-fly scalars.
     """
     states_par_np = plot.trim_newton_trace(
         states_par, iters, chain_length=chain_length
@@ -86,6 +90,15 @@ def save_core_deer_outputs(
     has_newton_trace = plot.has_full_newton_trace(states_par_np, chain_length)
     if progress_suptitle is None:
         progress_suptitle = f"{chain_length} {sampler_label} draws"
+
+    hist_err: np.ndarray | None = None
+    hist_res: np.ndarray | None = None
+    if newton_hist is not None:
+        hist_err, hist_res = plot.trim_newton_histories(
+            newton_hist.newton_err, newton_hist.residual_sq, iters
+        )
+        np.save(run_dir / "newton_err.npy", hist_err)
+        np.save(run_dir / "newton_residual_sq.npy", hist_res)
 
     if has_newton_trace:
         newton_iters = plot.sample_newton_iterations(iters)
@@ -135,10 +148,26 @@ def save_core_deer_outputs(
             title=f"Parallel-vs-sequential trajectory error, {sampler_label} ({target_name})",
         )
     else:
-        print(
-            "Skipping Newton-trace plots (parallel DEER used full_trace=False); "
-            "saving final trajectory arrays only."
-        )
+        if hist_err is not None:
+            plot.newton_max_error_plot(
+                errors=hist_err,
+                savepath=run_dir / "newton_err.png",
+                title=f"DEER Newton error, {sampler_label} ({target_name})",
+            )
+            plot.newton_residual_plot(
+                hist_res,
+                savepath=run_dir / "newton_residual.png",
+                title=f"Fixed-point residual, {sampler_label} ({target_name})",
+            )
+            print(
+                "Wrote Newton error / fixed-point residual plots from on-the-fly "
+                "histories (full_trace=False)."
+            )
+        else:
+            print(
+                "Skipping Newton-trace plots (parallel DEER used full_trace=False "
+                "and no newton_hist was provided)."
+            )
 
     np.save(run_dir / "states_par.npy", states_par_np)
     states_seq_np = np.asarray(jax.device_get(states_seq))

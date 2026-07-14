@@ -99,7 +99,7 @@ def _run_parallel_iters(
     )
     init_guess = initial_state[None, :] * jnp.ones((chain_length, dim))
     run_parallel = jax.jit(sampler.run_parallel_nuts)
-    _, iters = run_parallel(key, initial_state, init_guess, params)
+    _, iters, _ = run_parallel(key, initial_state, init_guess, params)
     return int(iters)
 
 
