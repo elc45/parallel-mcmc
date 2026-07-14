@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal
@@ -21,6 +22,44 @@ from src.util import (
 )
 
 import plot
+
+
+def run_timed_deer(
+    solve_fn: Callable[..., Any],
+    *args: Any,
+    max_iter: int,
+    label: str = "DEER",
+    log: bool = True,
+) -> tuple[Any, float]:
+    """JIT-compile and run a parallel DEER solve, printing wall-clock timings.
+
+    Compile and solve are timed separately so the logged solve time is the actual
+    DEER execution (after ``block_until_ready``), not host dispatch or XLA compile.
+
+    Returns
+    -------
+    outputs, solve_seconds
+        ``outputs`` is whatever ``solve_fn`` returns (typically
+        ``(states, iters, newton_hist)``); ``solve_seconds`` is the blocked solve
+        wall time.
+    """
+    jitted = jax.jit(solve_fn)
+
+    t0 = time.perf_counter()
+    compiled = jitted.lower(*args).compile()
+    compile_s = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
+    out = compiled(*args)
+    out = jax.tree_util.tree_map(jax.block_until_ready, out)
+    solve_s = time.perf_counter() - t0
+
+    if log:
+        if isinstance(out, tuple) and len(out) >= 2:
+            print(f"{label} converged in {int(out[1])} / {max_iter} Newton iterations")
+        print(f"{label} compile time: {compile_s:.4f} s")
+        print(f"{label} solve time: {solve_s:.4f} s")
+    return out, solve_s
 
 
 def deer_fixed_point_kwargs(

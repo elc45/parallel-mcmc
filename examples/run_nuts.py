@@ -24,6 +24,7 @@ if str(_EXAMPLES_DIR) not in sys.path:
     sys.path.insert(0, str(_EXAMPLES_DIR))
 
 from run_outputs import (
+    run_timed_deer,
     deer_fixed_point_kwargs,
     lyapunov_config_from_cfg,
     save_core_deer_outputs,
@@ -136,9 +137,14 @@ sampler = samplers.ParallelNUTS(
 
 trace_label = "full Newton trace" if full_trace else "final trajectory only"
 print(f"Running parallel NUTS ({trace_label})")
-run_parallel = jax.jit(sampler.run_parallel_nuts)
-states_par, iters, newton_hist = run_parallel(key, initial_state, init_trajectory_guess, params)
-print(f"DEER converged in {int(iters)} / {max_iter} Newton iterations")
+(states_par, iters, newton_hist), _ = run_timed_deer(
+    sampler.run_parallel_nuts,
+    key,
+    initial_state,
+    init_trajectory_guess,
+    params,
+    max_iter=max_iter,
+)
 
 if __name__ == "__main__":
     run_dir = resolve_run_dir(args)

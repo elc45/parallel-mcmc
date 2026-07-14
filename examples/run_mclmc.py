@@ -13,6 +13,7 @@ if str(_EXAMPLES_DIR) not in sys.path:
     sys.path.insert(0, str(_EXAMPLES_DIR))
 
 from run_outputs import (
+    run_timed_deer,
     lyapunov_config_from_cfg,
     save_core_deer_outputs,
     save_lyapunov_outputs,
@@ -122,11 +123,14 @@ sampler = samplers.ParallelMCLMC(
 
 trace_label = "full Newton trace" if full_trace else "final trajectory only"
 print(f"Running parallel MCLMC ({trace_label})")
-run_parallel = jax.jit(sampler.run_parallel_mclmc)
-states_par_packed, iters, newton_hist = run_parallel(
-    key, initial_state, init_trajectory_guess, params
+(states_par_packed, iters, newton_hist), _ = run_timed_deer(
+    sampler.run_parallel_mclmc,
+    key,
+    initial_state,
+    init_trajectory_guess,
+    params,
+    max_iter=max_iter,
 )
-print(f"DEER converged in {int(iters)} / {max_iter} Newton iterations")
 
 states_par = states_par_packed[..., :D]
 
