@@ -1,7 +1,8 @@
 {
-  "chain_length": 5000,
+  "chain_length": 500,
   "random_seed": 123,
   "initial_state_scale": 10.0,
-  "L": 5.0,
-  "step_size": 0.1
+  "L": 100.0,
+  "step_size": 0.1,
+  "compute_lyapunov": true
 }

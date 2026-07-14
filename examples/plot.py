@@ -590,13 +590,23 @@ def mass_matrix_seq_plot(
     plt.close(fig)
 
 
+def _newton_gif_frame_indices(num_newton_iters: int, max_frames: int = 250) -> np.ndarray:
+    """Evenly spaced Newton indices with ``min(num_newton_iters, max_frames)`` frames."""
+    n_frames = min(int(num_newton_iters), int(max_frames))
+    if n_frames <= 0:
+        return np.array([], dtype=int)
+    if n_frames == num_newton_iters:
+        return np.arange(num_newton_iters, dtype=int)
+    return np.unique(np.linspace(0, num_newton_iters - 1, num=n_frames, dtype=int))
+
+
 def mass_matrix_convergence_gif(
     m2_draw: np.ndarray,
     savepath: Path | str,
     *,
     count: np.ndarray,
     max_newton_iter: int | None = None,
-    step: int = 5,
+    max_frames: int = 250,
     duration: float = 0.005,
     welford_method: str = "standard",
     welford_n_init: float = 0.0,
@@ -618,8 +628,8 @@ def mass_matrix_convergence_gif(
     max_newton_iter
         If set, only animate through this Newton iteration (inclusive), dropping
         redundant post-convergence iterates.
-    step
-        Sample every ``step`` Newton iterations for animation frames.
+    max_frames
+        Cap on GIF frames; uses every Newton iterate when fewer than this many.
     duration
         Frame duration in seconds passed to ``imageio.mimsave``.
     """
@@ -634,7 +644,7 @@ def mass_matrix_convergence_gif(
     num_newton_iters, chain_length, D = m2_draw.shape
     gif_frames = []
 
-    for newt_iter in range(0, num_newton_iters, step):
+    for newt_iter in _newton_gif_frame_indices(num_newton_iters, max_frames):
         m2s = m2_draw[newt_iter]  # (chain_length, D)
         counts = np.asarray(count[newt_iter]).reshape(-1)
         variance_diag = np.stack(
@@ -669,7 +679,7 @@ def position_convergence_gif(
     savepath: Path | str,
     *,
     max_newton_iter: int | None = None,
-    step: int = 10,
+    max_frames: int = 250,
     duration: float = 0.005,
 ) -> None:
     """Animated GIF of chain position traces converging across Newton iterations.
@@ -683,8 +693,8 @@ def position_convergence_gif(
     max_newton_iter
         If set, only animate through this Newton iteration (inclusive), dropping
         redundant post-convergence iterates.
-    step
-        Sample every ``step`` Newton iterations for animation frames.
+    max_frames
+        Cap on GIF frames; uses every Newton iterate when fewer than this many.
     duration
         Frame duration in seconds passed to ``imageio.mimsave``.
     """
@@ -696,7 +706,7 @@ def position_convergence_gif(
     num_newton_iters, chain_length, D = position.shape
     gif_frames = []
 
-    for newt_iter in range(0, num_newton_iters, step):
+    for newt_iter in _newton_gif_frame_indices(num_newton_iters, max_frames):
         positions = position[newt_iter]  # (chain_length, D)
 
         fig, ax = plt.subplots()

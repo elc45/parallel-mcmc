@@ -255,8 +255,6 @@ def save_lyapunov_outputs(
     key: jnp.ndarray,
     chain_length: int,
     lyap_tangent_key: jnp.ndarray,
-    tangent_subspace: str,
-    position_dim: int | None,
     sampler_label: str,
     target_name: str,
 ) -> None:
@@ -267,19 +265,17 @@ def save_lyapunov_outputs(
         key,
         chain_length,
         lyap_tangent_key,
-        tangent_subspace=tangent_subspace,
-        position_dim=position_dim,
     )
     save_lyapunov_results(run_dir, lyap)
     plot.lyapunov_ftle_plot(
         lyap["ftle"],
         run_dir / "lyapunov_ftle.png",
         lyapunov_exponent=lyap["lyapunov_exponent"],
-        title=f"FTLE, sequential {sampler_label} ({target_name}, tangent={tangent_subspace})",
+        title=f"FTLE, sequential {sampler_label} ({target_name})",
     )
     print(
         f"Lyapunov exponent: {lyap['lyapunov_exponent']:.4f} "
-        f"(tail: {lyap['lyapunov_exponent_tail']:.4f}, tangent={tangent_subspace})"
+        f"(tail: {lyap['lyapunov_exponent_tail']:.4f})"
     )
 
     if not plot.has_full_newton_trace(states_par_np, chain_length):
@@ -295,18 +291,14 @@ def save_lyapunov_outputs(
         y0,
         key,
         lyap_tangent_key,
-        tangent_subspace=tangent_subspace,
-        position_dim=position_dim,
     )
-    save_newton_lyapunov_results(
-        run_dir, lyap_by_newton, tangent_subspace=tangent_subspace
-    )
+    save_newton_lyapunov_results(run_dir, lyap_by_newton)
     plot.newton_lyapunov_exponent_plot(
         lyap_by_newton,
         run_dir / "lyapunov_exponent_by_newton.png",
         title=(
             f"Lyapunov exponent vs Newton iter, {sampler_label} "
-            f"({target_name}, tangent={tangent_subspace})"
+            f"({target_name})"
         ),
     )
     print(
@@ -315,9 +307,8 @@ def save_lyapunov_outputs(
     )
 
 
-def lyapunov_config_from_cfg(cfg: dict[str, Any]) -> tuple[bool, jnp.ndarray, str]:
-    """Return ``(compute_lyapunov, lyap_tangent_key, tangent_subspace)`` from a sampler config."""
+def lyapunov_config_from_cfg(cfg: dict[str, Any]) -> tuple[bool, jnp.ndarray]:
+    """Return ``(compute_lyapunov, lyap_tangent_key)`` from a sampler config."""
     compute = bool(cfg.get("compute_lyapunov", True))
     lyap_tangent_key = jr.PRNGKey(int(cfg.get("lyapunov_seed", cfg["random_seed"] + 1)))
-    tangent_subspace = cfg.get("lyapunov_tangent", "full")
-    return compute, lyap_tangent_key, tangent_subspace
+    return compute, lyap_tangent_key

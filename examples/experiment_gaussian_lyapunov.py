@@ -61,8 +61,6 @@ def _run_case(
     key: jnp.ndarray,
     chain_length: int,
     params: dict,
-    tangent_subspace: str,
-    position_dim: int | None,
 ) -> dict:
     tangent_key = jr.PRNGKey(42)
     step_fn = lambda s, d: sampler.mala_fn_for_deer(s, d, params)
@@ -72,17 +70,14 @@ def _run_case(
         key,
         chain_length,
         tangent_key,
-        tangent_subspace=tangent_subspace,
-        position_dim=position_dim,
     )
-    ftle = lyap["ftle"]
     n = chain_length
     windows = {
         "last_1pct": float(np.mean(lyap["log_stretches"][-n // 100 :])),
         "last_0.1pct": float(np.mean(lyap["log_stretches"][-max(n // 1000, 1) :])),
         "last_10k": float(np.mean(lyap["log_stretches"][-min(10_000, n) :])),
     }
-    print(f"\n[{label}]  state_dim={y0.shape[-1]}  tangent={tangent_subspace}")
+    print(f"\n[{label}]  state_dim={y0.shape[-1]}")
     print(f"  FTLE(final)     = {lyap['lyapunov_exponent']:.6e}")
     print(f"  FTLE(tail 50%)  = {lyap['lyapunov_exponent_tail']:.6e}")
     for k, v in windows.items():
@@ -161,8 +156,6 @@ def main() -> None:
         key=key,
         chain_length=chain_length,
         params=params,
-        tangent_subspace="full",
-        position_dim=None,
     )
 
     # Fixed-mass MALA: position only
@@ -180,8 +173,6 @@ def main() -> None:
         key=key,
         chain_length=chain_length,
         params={"epsilon": params["epsilon"]},
-        tangent_subspace="full",
-        position_dim=None,
     )
 
     run_dir = _next_run_dir(RUNS_PARENT)

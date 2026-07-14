@@ -185,7 +185,7 @@ if __name__ == "__main__":
         ),
     )
 
-    compute_lyap, lyap_tangent_key, tangent_subspace = lyapunov_config_from_cfg(cfg)
+    compute_lyap, lyap_tangent_key = lyapunov_config_from_cfg(cfg)
     if compute_lyap:
         y0_lyap = (
             sampler._initial_packed_state(initial_state)
@@ -200,8 +200,6 @@ if __name__ == "__main__":
             key=key,
             chain_length=chain_length,
             lyap_tangent_key=lyap_tangent_key,
-            tangent_subspace=tangent_subspace,
-            position_dim=D if tangent_subspace == "position" else None,
             sampler_label="HMC",
             target_name=target.name,
         )

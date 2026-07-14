@@ -12,7 +12,11 @@ _REPO_ROOT = _EXAMPLES_DIR.parent
 if str(_EXAMPLES_DIR) not in sys.path:
     sys.path.insert(0, str(_EXAMPLES_DIR))
 
-from run_outputs import save_core_deer_outputs
+from run_outputs import (
+    lyapunov_config_from_cfg,
+    save_core_deer_outputs,
+    save_lyapunov_outputs,
+)
 from config import (
     SAMPLER_CONFIGS_DIR,
     add_run_config_args,
@@ -22,6 +26,7 @@ from config import (
     save_run_snapshot,
 )
 from targets import load_target
+import plot
 
 jax.config.update("jax_enable_x64", True)
 jax.config.update("jax_default_matmul_precision", "highest")
@@ -125,6 +130,20 @@ print(f"DEER converged in {int(iters)} / {max_iter} Newton iterations")
 
 states_par = states_par_packed[..., :D]
 
+# Drivers / packed y0 for residuals: same split as ParallelMCLMC.run_parallel_mclmc.
+deer_key = key
+deer_params = params
+if quasi and qmem_efficient:
+    deer_key, qmem_key = jr.split(deer_key)
+    deer_params = {**params, "key": qmem_key}
+init_key_par, chain_key_par = jr.split(deer_key)
+y0_par = sampler._initial_packed_state(initial_state, init_key_par)
+deer_drivers = (jr.split(chain_key_par, (chain_length,)), jnp.arange(chain_length))
+
+# Drivers / packed y0 for sequential Lyapunov: same split as run_sequential_mclmc.
+init_key_seq, chain_key_seq = jr.split(key)
+y0_seq = sampler._initial_packed_state(initial_state, init_key_seq)
+
 if __name__ == "__main__":
     run_dir = _next_run_dir(RUNS_PARENT)
     run_dir.mkdir(parents=False)
@@ -149,9 +168,36 @@ if __name__ == "__main__":
         quasi=quasi,
         sampler_label="MCLMC",
         target_name=target.name,
+        deer_step_fn=sampler.mclmc_fn_for_deer,
+        deer_drivers=deer_drivers,
+        deer_y0=y0_par,
+        deer_params=deer_params,
+        deer_states_par=states_par_packed,
     )
+
+    compute_lyap, lyap_tangent_key = lyapunov_config_from_cfg(cfg)
+    if compute_lyap:
+        states_par_packed_np = plot.trim_newton_trace(
+            states_par_packed, int(iters), chain_length=chain_length
+        )
+        save_lyapunov_outputs(
+            run_dir,
+            sampler_fn=lambda s, d: sampler.mclmc_fn_for_deer(s, d, params),
+            states_par_np=states_par_packed_np,
+            y0=y0_seq,
+            key=chain_key_seq,
+            chain_length=chain_length,
+            lyap_tangent_key=lyap_tangent_key,
+            sampler_label="MCLMC",
+            target_name=target.name,
+        )
 
     finalize_run(
         run_dir,
-        message=f"Saved config, plots, states_par.npy, states_seq.npy, and GIFs under {run_dir}",
+        message=(
+            f"Saved config, plots, states_par.npy, states_seq.npy"
+            + (", Newton-trace GIFs" if full_trace else "")
+            + (", and Lyapunov outputs" if compute_lyap else "")
+            + f" under {run_dir}"
+        ),
     )

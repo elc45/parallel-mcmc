@@ -353,15 +353,8 @@ def load_states_par(
 def _initial_unit_tangent(
     y0: jnp.ndarray,
     tangent_key: jnp.ndarray,
-    *,
-    tangent_subspace: Literal["full", "position"] = "full",
-    position_dim: int | None = None,
 ) -> jnp.ndarray:
-    if tangent_subspace == "position" and position_dim is None:
-        raise ValueError("position_dim is required when tangent_subspace='position'")
     v0 = jr.normal(tangent_key, y0.shape, dtype=y0.dtype)
-    if tangent_subspace == "position":
-        v0 = v0.at[position_dim:].set(0.0)
     v0_norm = jnp.linalg.norm(v0)
     return jnp.where(v0_norm > 0, v0 / v0_norm, v0)
 
@@ -372,16 +365,14 @@ def lyapunov_exponent_sequential(
     chain_key: jnp.ndarray,
     chain_length: int,
     tangent_key: jnp.ndarray,
-    *,
-    tangent_subspace: Literal["full", "position"] = "full",
-    position_dim: int | None = None,
-) -> dict[str, np.ndarray | float | str]:
+) -> dict[str, np.ndarray | float]:
     """Estimate the largest Lyapunov exponent of a sequential chain map via JVP propagation.
 
     Applies the Benettin renormalization algorithm to the discrete-time map
     ``y_{t+1} = step_fn(y_t, driver_t)`` using ``jax.jvp`` for the Jacobian-vector
     product. Returns the per-step log-stretch factors and the finite-time Lyapunov
-    estimate (running mean of log-stretches).
+    estimate (running mean of log-stretches). The initial tangent is a random
+    unit vector over the full state.
 
     Parameters
     ----------
@@ -396,26 +387,15 @@ def lyapunov_exponent_sequential(
         Number of transitions ``T``.
     tangent_key:
         PRNG key for drawing the initial unit tangent direction.
-    tangent_subspace:
-        ``"full"`` perturbs all state components; ``"position"`` restricts the
-        initial tangent to the leading ``position_dim`` coordinates (Welford slots
-        receive zero initial perturbation).
-    position_dim:
-        Required when ``tangent_subspace="position"``.
 
     Returns
     -------
     dict
         ``log_stretches`` (T,), ``ftle`` (T,), ``lyapunov_exponent`` (scalar,
-        ``ftle[-1]``), ``lyapunov_exponent_tail`` (mean log-stretch over the
-        second half of the chain), and ``tangent_subspace``.
+        ``ftle[-1]``), and ``lyapunov_exponent_tail`` (mean log-stretch over the
+        second half of the chain).
     """
-    v0 = _initial_unit_tangent(
-        y0,
-        tangent_key,
-        tangent_subspace=tangent_subspace,
-        position_dim=position_dim,
-    )
+    v0 = _initial_unit_tangent(y0, tangent_key)
 
     drivers = (jr.split(chain_key, (chain_length,)), jnp.arange(chain_length))
 
@@ -442,7 +422,6 @@ def lyapunov_exponent_sequential(
         "ftle": ftle,
         "lyapunov_exponent": float(ftle[-1]),
         "lyapunov_exponent_tail": float(np.mean(tail)) if tail.size else float(ftle[-1]),
-        "tangent_subspace": tangent_subspace,
     }
 
 
@@ -452,18 +431,10 @@ def _log_stretches_along_trajectory(
     y0: jnp.ndarray,
     chain_key: jnp.ndarray,
     tangent_key: jnp.ndarray,
-    *,
-    tangent_subspace: Literal["full", "position"] = "full",
-    position_dim: int | None = None,
 ) -> jnp.ndarray:
     """Per-step log stretch factors along a prescribed chain trajectory."""
     chain_length = int(trajectory.shape[0])
-    v0 = _initial_unit_tangent(
-        y0,
-        tangent_key,
-        tangent_subspace=tangent_subspace,
-        position_dim=position_dim,
-    )
+    v0 = _initial_unit_tangent(y0, tangent_key)
     keys = jr.split(chain_key, (chain_length,))
     base_states = jnp.concatenate([y0[None, :], trajectory[:-1]], axis=0)
 
@@ -491,9 +462,6 @@ def lyapunov_exponent_along_trajectory(
     y0: jnp.ndarray,
     chain_key: jnp.ndarray,
     tangent_key: jnp.ndarray,
-    *,
-    tangent_subspace: Literal["full", "position"] = "full",
-    position_dim: int | None = None,
 ) -> float:
     """Largest Lyapunov exponent along a prescribed chain trajectory.
 
@@ -508,8 +476,6 @@ def lyapunov_exponent_along_trajectory(
         y0,
         chain_key,
         tangent_key,
-        tangent_subspace=tangent_subspace,
-        position_dim=position_dim,
     )
     return float(jnp.mean(log_stretches))
 
@@ -520,9 +486,6 @@ def lyapunov_exponent_by_newton(
     y0: jnp.ndarray,
     chain_key: jnp.ndarray,
     tangent_key: jnp.ndarray,
-    *,
-    tangent_subspace: Literal["full", "position"] = "full",
-    position_dim: int | None = None,
 ) -> np.ndarray:
     """Scalar Lyapunov exponent at each Newton iterate of a DEER parallel trace.
 
@@ -541,8 +504,6 @@ def lyapunov_exponent_by_newton(
             y0,
             chain_key,
             tangent_key,
-            tangent_subspace=tangent_subspace,
-            position_dim=position_dim,
         )
         return jnp.mean(log_stretches)
 
@@ -553,15 +514,12 @@ def lyapunov_exponent_by_newton(
 def save_newton_lyapunov_results(
     run_dir: str | Path,
     lyapunov_exponent_by_newton: np.ndarray,
-    *,
-    tangent_subspace: str,
 ) -> None:
     """Save per-Newton Lyapunov exponent array and summary JSON."""
     run_dir = Path(run_dir)
     arr = np.asarray(lyapunov_exponent_by_newton, dtype=np.float64)
     np.save(run_dir / "lyapunov_exponent_by_newton.npy", arr)
     summary = {
-        "tangent_subspace": tangent_subspace,
         "num_newton_iters": int(arr.shape[0]),
         "lyapunov_exponent_final": float(arr[-1]) if arr.size else None,
     }
@@ -577,7 +535,6 @@ def save_lyapunov_results(run_dir: str | Path, lyap: dict) -> None:
     summary = {
         "lyapunov_exponent": float(lyap["lyapunov_exponent"]),
         "lyapunov_exponent_tail": float(lyap["lyapunov_exponent_tail"]),
-        "tangent_subspace": lyap["tangent_subspace"],
     }
     with open(run_dir / "lyapunov.json", "w") as f:
         json.dump(summary, f, indent=2)

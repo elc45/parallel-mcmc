@@ -93,7 +93,6 @@ def main() -> None:
         jr.PRNGKey(args.seed),
         T,
         jr.PRNGKey(args.seed + 1),
-        tangent_subspace="full",
     )
 
     ftle = np.asarray(lyap["ftle"])[1:]  # drop singular first update
