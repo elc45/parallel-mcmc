@@ -77,6 +77,7 @@ quasi = deer["quasi"]
 qmem_efficient = deer["qmem_efficient"]
 clip_val = deer["clip_val"]
 full_trace = deer["full_trace"]
+sigmoid_accept = bool(cfg.get("sigmoid_accept", True))
 welford_init = cfg.get("welford_init")
 welford_settings = welford_settings_from_config(cfg)
 
@@ -102,6 +103,7 @@ sampler = samplers.ParallelHMC(
     quasi=quasi,
     qmem_efficient=qmem_efficient,
     clip_val=clip_val,
+    sigmoid_accept=sigmoid_accept,
     welford_init=welford_init,
     **welford_settings,
 )
@@ -130,12 +132,14 @@ sampler = samplers.ParallelHMC(
     adaptive_mass=adaptive_mass,
     qmem_efficient=qmem_efficient,
     clip_val=clip_val,
+    sigmoid_accept=sigmoid_accept,
     welford_init=welford_init,
     **welford_settings,
 )
 
 trace_label = "full Newton trace" if full_trace else "final trajectory only"
-print(f"Running parallel HMC ({trace_label})")
+accept_label = "sigmoid_accept" if sigmoid_accept else "hard accept"
+print(f"Running parallel HMC ({trace_label}, {accept_label})")
 (states_par, iters, newton_hist), _ = run_timed_deer(
     sampler.run_parallel_hmc,
     key,

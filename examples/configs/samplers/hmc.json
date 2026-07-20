@@ -7,5 +7,6 @@
   "epsilon": 0.1,
   "num_leapfrog_steps": 8,
   "mass_adapt_steps": 1000,
+  "sigmoid_accept": true,
   "compute_lyapunov": true
 }

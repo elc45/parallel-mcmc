@@ -296,6 +296,7 @@ class ParallelHMC:
     welford_init: dict
     welford_method: Literal["standard", "discounted"]
     welford_n_init: float
+    sigmoid_accept: bool
     chain_state_dim: int
     target_log_prob_and_grad: Callable
 
@@ -316,7 +317,8 @@ class ParallelHMC:
                 adaptive_mass: str | bool | None = None,
                 welford_init: dict | None = None,
                 welford_method: str | None = None,
-                welford_n_init: float | None = None):
+                welford_n_init: float | None = None,
+                sigmoid_accept: bool = True):
         '''
         Args:
             log_prob           - unnormalized log-posterior callable; must accept only the position
@@ -370,6 +372,9 @@ class ParallelHMC:
                                  accumulator for adaptive mass.
             welford_n_init     - discount offset ``n^\\text{init}`` for discounted Welford
                                  (default ``0``; may also be set via ``welford_init[\"n_init\"]``).
+            sigmoid_accept     - if True (default), MH accept uses :func:`sigmoid_accept`
+                                 (hard 0/1 forward, sigmoid backward via ``stop_gradient``);
+                                 if False, a hard Bernoulli accept/reject (same RNG either way).
         '''
         self.log_prob = log_prob
         self.D = dim
@@ -392,11 +397,18 @@ class ParallelHMC:
         self.welford_n_init = float(
             welford_n_init if welford_n_init is not None else init_n
         )
+        self.sigmoid_accept = bool(sigmoid_accept)
         self.chain_state_dim = (
             _packed_state_dim(dim, self.adaptive_mass)
             if self.adaptive_mass is not None
             else dim
         )
+
+    def _mh_accept_indicator(self, log_accept_ratio, u, dtype):
+        """Metropolis accept indicator; see constructor ``sigmoid_accept``."""
+        if self.sigmoid_accept:
+            return sigmoid_accept(log_accept_ratio - jnp.log(u))
+        return (log_accept_ratio > jnp.log(u)).astype(dtype)
 
     def scan_leapfrog(self, state, step_size):
         # Assumes you start and end 
@@ -619,7 +631,7 @@ class ParallelHMC:
         log_accept_ratio = energy - new_energy
 
         u = jr.uniform(mh_seed, [])
-        g = sigmoid_accept(log_accept_ratio - jnp.log(u))
+        g = self._mh_accept_indicator(log_accept_ratio, u, position.dtype)
         new_position = g * new_position + (1.0 - g) * position
 
         do_adapt = t < mass_adapt_steps
@@ -701,7 +713,7 @@ class ParallelHMC:
         log_accept_ratio = energy - new_energy
 
         u = jr.uniform(mh_seed, [])
-        g = sigmoid_accept(log_accept_ratio - jnp.log(u))
+        g = self._mh_accept_indicator(log_accept_ratio, u, position.dtype)
         new_position = g * new_position + (1.0 - g) * position
         return new_position, g
 
@@ -827,6 +839,7 @@ class ParallelMALA(ParallelHMC):
 
     i.e. ``y ~ N(x + (eps^2 / 2) A grad_logp(x), eps^2 A)``, accepted with the standard MALA
     Metropolis-Hastings ratio. ``num_leapfrog_steps`` is ignored (MALA is a single step).
+    MH accept uses the inherited ``sigmoid_accept`` flag (see :class:`ParallelHMC`).
     """
 
     def _mala_propose_accept(self, position, mass_diag, seed, step_size):
@@ -853,7 +866,7 @@ class ParallelMALA(ParallelHMC):
         log_accept_ratio = (tlp_y - tlp_x) + (log_q_bwd - log_q_fwd)
 
         u = jr.uniform(mh_seed, [])
-        g = sigmoid_accept(log_accept_ratio - jnp.log(u))
+        g = self._mh_accept_indicator(log_accept_ratio, u, position.dtype)
         new_position = g * proposal + (1.0 - g) * position
         grad_new = g * grad_y + (1.0 - g) * grad_x
         return new_position, grad_new, g
