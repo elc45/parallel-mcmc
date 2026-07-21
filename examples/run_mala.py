@@ -1,7 +1,10 @@
 """Run parallel MALA (Metropolis-adjusted Langevin) with DEER and optional Welford adaptive mass.
 
 Same diagonal adaptive-mass modes as ``run_hmc.py`` (``adaptive_mass``: null, ``draw-only``,
-or ``grad``). Produces the same outputs (progress plot, Newton-error and residual plots,
+or ``grad``). Set ``sigmoid_accept`` in the sampler config (default true) to use the
+stop-gradient MH relaxation; false uses a hard Bernoulli accept with the same RNG.
+
+Produces the same outputs (progress plot, Newton-error and residual plots,
 mass-matrix error plot, sequential mass-matrix plot, position/mass GIFs, and saved
 ``.npy`` arrays).
 
@@ -92,6 +95,7 @@ quasi = deer["quasi"]
 qmem_efficient = deer["qmem_efficient"]
 clip_val = deer["clip_val"]
 full_trace = deer["full_trace"]
+sigmoid_accept = bool(cfg.get("sigmoid_accept", True))
 welford_init = cfg.get("welford_init")
 welford_settings = welford_settings_from_config(cfg)
 
@@ -116,6 +120,7 @@ sampler = samplers.ParallelMALA(
     quasi=quasi,
     qmem_efficient=qmem_efficient,
     clip_val=clip_val,
+    sigmoid_accept=sigmoid_accept,
     welford_init=welford_init,
     **welford_settings,
 )
@@ -155,12 +160,14 @@ sampler = samplers.ParallelMALA(
     adaptive_mass=adaptive_mass,
     qmem_efficient=qmem_efficient,
     clip_val=clip_val,
+    sigmoid_accept=sigmoid_accept,
     welford_init=welford_init,
     **welford_settings,
 )
 
 trace_label = "full Newton trace" if full_trace else "final trajectory only"
-print(f"Running parallel MALA ({trace_label})")
+accept_label = "sigmoid_accept" if sigmoid_accept else "hard accept"
+print(f"Running parallel MALA ({trace_label}, {accept_label})")
 (states_par, iters, newton_hist), _ = run_timed_deer(
     sampler.run_parallel_mala,
     key,
