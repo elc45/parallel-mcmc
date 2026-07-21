@@ -33,24 +33,25 @@
 #SBATCH --time=01:00:00
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1
-#SBATCH --mem=128G
+#SBATCH --mem=32G
 #SBATCH --gpus-per-task=1
 
 set -euo pipefail
 
 module purge
-module load python uv
+# module load python uv
+module load apptainer
 
 # SLURM sets SLURM_SUBMIT_DIR to the directory you ran sbatch from.
 REPO_ROOT="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 cd "${REPO_ROOT}"
 
-export PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
+# export PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 
-echo "Python: $(command -v python)"
-python -V
-echo "uv: $(command -v uv)"
-uv -V
+# echo "Python: $(command -v python)"
+# python -V
+# echo "uv: $(command -v uv)"
+# uv -V
 
 mkdir -p logs
 if [[ -n "${SLURM_JOB_ID:-}" ]]; then
@@ -207,10 +208,18 @@ echo "Sampler config: ${SAMPLER_CONFIG}"
 echo "DEER config:    ${DEER_CONFIG}"
 echo "Latest run:     ${LATEST_RUN}"
 
-uv run "${RUN_SCRIPT}" \
-  --target "${TARGET}" \
-  --sampler-config "${SAMPLER_CONFIG}" \
-  --deer-config "${DEER_CONFIG}"
+# uv run "${RUN_SCRIPT}" \
+#   --target "${TARGET}" \
+#   --sampler-config "${SAMPLER_CONFIG}" \
+#   --deer-config "${DEER_CONFIG}"
+
+apptainer exec --nv --cleanenv --bind "$SCRATCH:$SCRATCH" \
+    --bind "$GROUP_HOME:$GROUP_HOME" --bind "$GROUP_SCRATCH:$GROUP_SCRATCH" \
+    "$GROUP_HOME/$USER/deer/jax-py3135-cuda12.sif" /opt/venv/bin/python \
+    ${RUN_SCRIPT} \
+    --target ${TARGET} \
+    --sampler-config ${SAMPLER_CONFIG} \
+    --deer-config ${DEER_CONFIG}
 
 # Copy logs again after Python exits so the final lines are included.
 if [[ -n "${SLURM_JOB_ID:-}" && -f "${LATEST_RUN}" ]]; then
