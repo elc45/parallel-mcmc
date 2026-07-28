@@ -9,9 +9,6 @@ from typing import Literal
 import src
 from src import deer, windowed_qdeer
 
-from tensorflow_probability.substrates import jax as tfp
-tfd = tfp.distributions
-
 def sigmoid_accept(x):
     """
     Differentiable relaxation of "0 if x < 0, 1 if x > 0".
@@ -1544,23 +1541,6 @@ class ParallelLangevin:
         return out_states, iters, newton_hist
 
 
-def _patch_jnp_clip_max_keyword() -> None:
-    """BlackJAX 1.2.x uses ``jnp.clip(..., max=)``; JAX 0.4.x expects ``a_max=``."""
-    if getattr(jnp.clip, "_deer_supports_max_kw", False):
-        return
-    _orig_clip = jnp.clip
-
-    def _clip(a, a_min=None, a_max=None, out=None, *, min=None, max=None):
-        if min is not None:
-            a_min = min
-        if max is not None:
-            a_max = max
-        return _orig_clip(a, a_min=a_min, a_max=a_max, out=out)
-
-    _clip._deer_supports_max_kw = True
-    jnp.clip = _clip
-
-
 class ParallelNUTS:
     """Parallel DEER with BlackJAX No-U-Turn Sampler (NUTS) transitions.
 
@@ -1587,7 +1567,6 @@ class ParallelNUTS:
         max_num_doublings: int = 10,
         divergence_threshold: float = 1000.0,
     ):
-        _patch_jnp_clip_max_keyword()
         from blackjax.mcmc import nuts as blackjax_nuts
 
         self.log_prob = log_prob

@@ -356,7 +356,7 @@ def block_diagonal_deer_iteration_helper(
 
         if clip_ytnext:
             clip = 1e8
-            yt_next = jnp.clip(yt_next, a_min=-clip, a_max=clip)
+            yt_next = jnp.clip(yt_next, -clip, clip)
             yt_next = jnp.where(jnp.isnan(yt_next), 0.0, yt_next)
 
         err = jnp.max(jnp.abs(yt_next - yt))  # checking convergence

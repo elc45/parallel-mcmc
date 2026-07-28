@@ -198,7 +198,7 @@ def diagonal_deer_iteration_helper(
 
         if clip_ytnext:
             clip = 1e8
-            yt_next_win = jnp.clip(yt_next_win, a_min=-clip, a_max=clip)
+            yt_next_win = jnp.clip(yt_next_win, -clip, clip)
             yt_next_win = jnp.where(jnp.isnan(yt_next_win), 0.0, yt_next_win)
 
         # relative tolerance
@@ -238,7 +238,7 @@ def diagonal_deer_iteration_helper(
 
         if clip_ytnext:
             clip = 1e8
-            yt_next_win = jnp.clip(yt_next_win, a_min=-clip, a_max=clip)
+            yt_next_win = jnp.clip(yt_next_win, -clip, clip)
             yt_next_win = jnp.where(jnp.isnan(yt_next_win), 0.0, yt_next_win)
 
         # relative tolerance

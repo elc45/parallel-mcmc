@@ -199,7 +199,9 @@ if __name__ == "__main__":
     finalize_run(
         run_dir,
         message=(
-            f"Saved config, plots, states_par.npy, states_seq.npy"
+            f"Saved config, plots, "
+            + ("states_deer_newton.npy" if full_trace else "states_deer_final.npy")
+            + ", states_seq.npy"
             + (", Newton-trace GIFs" if full_trace else "")
             + (", and Lyapunov outputs" if compute_lyap else "")
             + f" under {run_dir}"

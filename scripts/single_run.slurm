@@ -33,7 +33,7 @@
 #SBATCH --time=01:00:00
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1
-#SBATCH --mem=32G
+#SBATCH --mem=16G
 #SBATCH --gpus-per-task=1
 
 set -euo pipefail
@@ -213,13 +213,14 @@ echo "Latest run:     ${LATEST_RUN}"
 #   --sampler-config "${SAMPLER_CONFIG}" \
 #   --deer-config "${DEER_CONFIG}"
 
-apptainer exec --nv --cleanenv --bind "$SCRATCH:$SCRATCH" \
-    --bind "$GROUP_HOME:$GROUP_HOME" --bind "$GROUP_SCRATCH:$GROUP_SCRATCH" \
-    "$GROUP_HOME/$USER/deer/jax-py3135-cuda12.sif" /opt/venv/bin/python \
-    ${RUN_SCRIPT} \
-    --target ${TARGET} \
-    --sampler-config ${SAMPLER_CONFIG} \
-    --deer-config ${DEER_CONFIG}
+apptainer exec --nv --cleanenv \
+    --bind ${REPO_ROOT}:${REPO_ROOT} \
+    ${HOME}/deer/jax-py3135-cuda12.sif \
+    bash -c "PYTHONPATH=${REPO_ROOT} \
+    /opt/venv/bin/python ${RUN_SCRIPT} \
+        --target ${TARGET} \
+        --sampler-config ${SAMPLER_CONFIG} \
+        --deer-config ${DEER_CONFIG}"
 
 # Copy logs again after Python exits so the final lines are included.
 if [[ -n "${SLURM_JOB_ID:-}" && -f "${LATEST_RUN}" ]]; then

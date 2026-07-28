@@ -22,7 +22,6 @@ import jax.numpy as jnp
 import jax.random as jr
 import numpy as np
 from blackjax.adaptation.window_adaptation import window_adaptation
-from src.samplers import _patch_jnp_clip_max_keyword
 
 _EXAMPLES_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = _EXAMPLES_DIR.parent
@@ -128,7 +127,6 @@ def _inverse_mass_matrix_to_json(inverse_mass_matrix: jnp.ndarray) -> list[float
 
 
 def main() -> None:
-    _patch_jnp_clip_max_keyword()
     args = _parse_args()
 
     warmup_path = args.warmup_config.resolve()

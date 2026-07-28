@@ -4,5 +4,6 @@
   "rtol": 1e-5,
   "quasi": false,
   "qmem_efficient": false,
-  "clip_val": 1e8
+  "clip_val": 1e8,
+  "full_trace": false
 }

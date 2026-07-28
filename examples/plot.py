@@ -567,6 +567,82 @@ def progress_plot(
     return fig
 
 
+def final_progress_plot(
+    states_deer: jnp.ndarray | np.ndarray,
+    states_seq: jnp.ndarray | np.ndarray,
+    initial_state: jnp.ndarray | np.ndarray,
+    *,
+    chain_length: int | None = None,
+    ix: int = 0,
+    iy: int = 1,
+    xlabel: str = r"$x_1$",
+    ylabel: str = r"$x_2$",
+    figsize: tuple[float, float] = (6.0, 6.0),
+    savepath: Path | str | None = None,
+    title: str | None = None,
+) -> plt.Figure:
+    """Single-panel stand-in for ``progress_plot`` when ``full_trace=False``.
+
+    Overlays the final DEER trajectory on the sequential chain in the ``(ix, iy)``
+    plane (same styling as one ``progress_plot`` panel).
+    """
+    states_deer = _to_numpy(states_deer)
+    states_seq = _to_numpy(states_seq)
+    initial_state = _to_numpy(initial_state)
+
+    fig, ax = plt.subplots(figsize=figsize)
+
+    seq_with_init = np.vstack([initial_state[None, :], states_seq])
+    seq_x = np.asarray(seq_with_init[:, ix], dtype=float)
+    seq_y = np.asarray(seq_with_init[:, iy], dtype=float)
+    xlo, xhi, ylo, yhi = _xy_limits_with_padding(seq_x, seq_y)
+
+    deer_x = np.asarray(states_deer[:, ix], dtype=float)
+    deer_y = np.asarray(states_deer[:, iy], dtype=float)
+    deer_x, deer_y = _mask_outside_limits(deer_x, deer_y, (xlo, xhi), (ylo, yhi))
+
+    ax.plot(
+        deer_x,
+        deer_y,
+        alpha=0.75,
+        rasterized=True,
+        zorder=2,
+        label="DEER (final)",
+    )
+    ax.plot(
+        seq_x,
+        seq_y,
+        color="k",
+        alpha=0.75,
+        lw=1.2,
+        rasterized=True,
+        zorder=1,
+        label="Sequential",
+    )
+    ax.scatter(
+        initial_state[ix],
+        initial_state[iy],
+        color="red",
+        s=60,
+        zorder=3,
+        label="Initial state",
+    )
+
+    ax.set_xlim(xlo, xhi)
+    ax.set_ylim(ylo, yhi)
+    ax.set_xlabel(xlabel, fontsize=16)
+    ax.set_ylabel(ylabel, fontsize=16)
+    if title is None:
+        n = chain_length if chain_length is not None else states_seq.shape[0]
+        title = f"{n} draws: final DEER vs sequential"
+    ax.set_title(title, fontsize=12)
+    ax.legend()
+    fig.tight_layout()
+    if savepath is not None:
+        fig.savefig(savepath, dpi=150, bbox_inches="tight")
+    return fig
+
+
 def mass_matrix_seq_plot(
     mass_seq: np.ndarray,
     savepath: Path | str,

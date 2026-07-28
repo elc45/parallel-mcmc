@@ -122,6 +122,8 @@ def save_core_deer_outputs(
 
     When ``full_trace=False``, pass ``newton_hist`` (``NewtonHistories`` from ``deer.seq1d``)
     to still write ``newton_err.png`` and ``newton_residual.png`` from on-the-fly scalars.
+    Parallel states are saved as ``states_deer_final.npy`` (final trajectory) or
+    ``states_deer_newton.npy`` (full Newton stack when ``full_trace=True``).
     """
     states_par_np = plot.trim_newton_trace(
         states_par, iters, chain_length=chain_length
@@ -187,6 +189,14 @@ def save_core_deer_outputs(
             title=f"Parallel-vs-sequential trajectory error, {sampler_label} ({target_name})",
         )
     else:
+        plot.final_progress_plot(
+            states_par_np,
+            states_seq,
+            initial_state,
+            chain_length=chain_length,
+            savepath=run_dir / "progress.png",
+            title=progress_suptitle,
+        )
         if hist_err is not None:
             plot.newton_max_error_plot(
                 errors=hist_err,
@@ -199,16 +209,19 @@ def save_core_deer_outputs(
                 title=f"Fixed-point residual, {sampler_label} ({target_name})",
             )
             print(
-                "Wrote Newton error / fixed-point residual plots from on-the-fly "
-                "histories (full_trace=False)."
+                "Wrote final DEER-vs-sequential progress plot and Newton error / "
+                "fixed-point residual plots from on-the-fly histories (full_trace=False)."
             )
         else:
             print(
-                "Skipping Newton-trace plots (parallel DEER used full_trace=False "
-                "and no newton_hist was provided)."
+                "Wrote final DEER-vs-sequential progress plot (full_trace=False; "
+                "no newton_hist for error/residual curves)."
             )
 
-    np.save(run_dir / "states_par.npy", states_par_np)
+    if has_newton_trace:
+        np.save(run_dir / "states_deer_newton.npy", states_par_np)
+    else:
+        np.save(run_dir / "states_deer_final.npy", states_par_np)
     states_seq_np = np.asarray(jax.device_get(states_seq))
     np.save(run_dir / "states_seq.npy", states_seq_np)
 

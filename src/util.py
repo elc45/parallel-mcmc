@@ -316,10 +316,12 @@ def load_states_par(
     D: int | None = None,
     mode: Literal["grad", "draw-only"] | None = None,
 ):
-    """Load a ``states_par.npy`` trace file saved by a parallel HMC run.
+    """Load a parallel DEER states ``.npy`` file from a run directory.
 
-    Saved arrays have shape ``(chain_length, state_dim)`` when ``full_trace=False``
-    or ``(num_newton_iters, chain_length, state_dim)`` when ``full_trace=True``.
+    Typical filenames are ``states_deer_final.npy`` (``full_trace=False``, shape
+    ``(chain_length, state_dim)``) or ``states_deer_newton.npy`` (``full_trace=True``,
+    shape ``(num_newton_iters, chain_length, state_dim)``). Legacy ``states_par.npy``
+    files use the same layouts.
     When adaptive mass is active, ``state_dim`` is ``3*D`` (``"draw-only"``) or
     ``5*D`` (``"grad"``); otherwise it equals ``D``.
 
