@@ -258,12 +258,12 @@ def save_core_deer_outputs(
                 states_par_np, dim, adaptive_mass_mode
             )
             position_arr = unpacked[0]
-            m2_arr = unpacked[2]
+            var_arr = unpacked[2]
             num_newton_iters, chain_len = states_par_np.shape[0], states_par_np.shape[1]
             count_1d = welford_count_trajectory(chain_len, mass_adapt_steps)
             count_arr = np.broadcast_to(count_1d, (num_newton_iters, chain_len))
             plot.mass_matrix_convergence_gif(
-                m2_arr,
+                var_arr,
                 run_dir / "mass_matrix_trace.gif",
                 count=count_arr,
                 max_newton_iter=int(iters),

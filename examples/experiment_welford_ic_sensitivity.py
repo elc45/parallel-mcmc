@@ -1,7 +1,7 @@
 """Welford LLE on an i.i.d. sample stream.
 
 On i.i.d. draws the largest Lyapunov exponent of the sequential Welford map
-should asymptote to 0 from below. The first update is singular (mean=M2=0).
+should asymptote to 0 from below. The first update is singular (mean=var=0).
 
 Run:
     uv run examples/experiment_welford_ic_sensitivity.py
@@ -66,12 +66,12 @@ def _welford_step_fn(
         _key, t = driver
         t_idx = jnp.asarray(t, dtype=jnp.int32)
         count = jnp.asarray(t, dtype=samples.dtype)
-        mean, m2 = y[:D], y[D:]
+        mean, var = y[:D], y[D:]
         sample = samples[t_idx]
-        _count_n, mean_n, m2_n = _welford_update_accumulator(
-            method, count, mean, m2, sample, n_init=n_init_j
+        _count_n, mean_n, var_n = _welford_update_accumulator(
+            method, count, mean, var, sample, n_init=n_init_j
         )
-        return jnp.concatenate([mean_n, m2_n])
+        return jnp.concatenate([mean_n, var_n])
 
     return step_fn
 

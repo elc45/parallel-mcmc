@@ -3,17 +3,17 @@
 Experiment: is Welford's online variance estimate parallelizable with DEER?
 
 We forget MCMC sampling entirely. Instead we take a stream of ``T`` i.i.d. normal
-samples with a known variance and maintain a *Welford* running (mean, M2) estimate.
-Welford is an inherently sequential recurrence
+samples with a known variance and maintain a *Welford* running ``(mean, variance)``
+estimate. Classical Welford carries ``(mean, ssq)`` with ``var = ssq / (n - 1)``;
+here we keep variance in the state (same values, different Jacobians):
 
     n_t    = n_{t-1} + 1
     mean_t = mean_{t-1} + (x_t - mean_{t-1}) / n_t
-    M2_t   = M2_{t-1} + (x_t - mean_{t-1}) (x_t - mean_t)
-
-with running (unbiased) variance ``var_t = M2_t / (n_t - 1)``.
+    ssq_t  = var_{t-1} * max(n_{t-1} - 1, 0) + (x_t - mean_{t-1}) (x_t - mean_t)
+    var_t  = ssq_t / (n_t - 1)   (0 when n_t <= 1)
 
 We cast this as a DEER fixed-point problem ``y[i] = func(y[i-1], x[i])`` with state
-``y = [mean, M2]`` and driver ``x = [sample, n]``, then check whether DEER's Newton
+``y = [mean, var]`` and driver ``x = [sample, n]``, then check whether DEER's Newton
 iterations recover the exact sequential Welford stream, and how many iterations that
 takes as a function of ``T``.
 
@@ -49,19 +49,21 @@ def welford_step(y: jnp.ndarray, x: jnp.ndarray, params) -> jnp.ndarray:
     """One Welford update, in DEER ``func(y, x, params)`` form.
 
     Args:
-        y: state ``[mean_prev, M2_prev]``, shape (2,).
+        y: state ``[mean_prev, var_prev]``, shape (2,).
         x: driver ``[sample, n]`` where ``n`` is the (1-indexed) running count
             *after* absorbing this sample.
     Returns:
-        next state ``[mean, M2]``, shape (2,).
+        next state ``[mean, var]``, shape (2,).
     """
-    mean_prev, m2_prev = y[0], y[1]
+    mean_prev, var_prev = y[0], y[1]
     sample, n = x[0], x[1]
+    count = n - 1.0
     delta = sample - mean_prev
     mean = mean_prev + delta / n
-    delta2 = sample - mean
-    m2 = m2_prev + delta * delta2
-    return jnp.array([mean, m2])
+    ssq = jnp.where(count > 1.0, var_prev * (count - 1.0), 0.0)
+    ssq_new = ssq + delta * (sample - mean)
+    var = jnp.where(n > 1.0, ssq_new / (n - 1.0), 0.0)
+    return jnp.array([mean, var])
 
 
 def sequential_welford(y0: jnp.ndarray, drivers: jnp.ndarray) -> jnp.ndarray:
@@ -76,9 +78,9 @@ def sequential_welford(y0: jnp.ndarray, drivers: jnp.ndarray) -> jnp.ndarray:
 
 
 def variance_from_state(states: jnp.ndarray, counts: jnp.ndarray) -> jnp.ndarray:
-    """Unbiased running variance ``M2 / (n - 1)`` (0 when n <= 1)."""
-    m2 = states[..., 1]
-    return jnp.where(counts > 1.0, m2 / jnp.maximum(counts - 1.0, 1.0), 0.0)
+    """Running variance from packed state (0 when n <= 1)."""
+    var = states[..., 1]
+    return jnp.where(counts > 1.0, var, 0.0)
 
 
 # --------------------------------------------------------------------------- #
@@ -233,13 +235,11 @@ def make_plots(results, sweep, sweep_q, args):
     res = results[False]
     counts = res["counts"]
     ax.plot(counts, res["var_truth"], lw=2, label="sequential Welford truth")
-    final_var = np.where(
-        counts > 1.0, res["trace"][-1, :, 1] / np.maximum(counts - 1.0, 1.0), 0.0
-    )
+    final_var = np.where(counts > 1.0, res["trace"][-1, :, 1], 0.0)
     ax.plot(counts, final_var, ls="--", label="DEER final iterate")
     ax.axhline(args.true_var, color="k", ls=":", alpha=0.6, label=f"true var = {args.true_var}")
     ax.set_xlabel("stream index t")
-    ax.set_ylabel("running variance  M2/(n-1)")
+    ax.set_ylabel("running variance")
     ax.set_title("Welford running variance")
     ax.legend()
     ax.grid(True, alpha=0.3)

@@ -59,56 +59,69 @@ def _packed_state_dim(D: int, mode: Literal["grad", "draw-only"]) -> int:
 
 
 def _unpack_draw_only(packed: jnp.ndarray, D: int):
-    """Position (D) + mean (D) + M2 (D)."""
+    """Position (D) + mean (D) + variance (D)."""
     position = packed[:D]
     mean = packed[D : 2 * D]
-    m2_diag = packed[2 * D :]
-    return position, mean, m2_diag
+    var_diag = packed[2 * D :]
+    return position, mean, var_diag
 
 
-def _pack_draw_only(position, mean, m2_diag):
-    return jnp.concatenate([position, mean, m2_diag])
+def _pack_draw_only(position, mean, var_diag):
+    return jnp.concatenate([position, mean, var_diag])
 
 
 def _unpack_grad_adaptive_state(packed: jnp.ndarray, D: int):
     """Unpack ``grad`` layout: position, draw Welford, grad Welford (packed dim ``5D``)."""
     position = packed[:D]
     mean_draw = packed[D : 2 * D]
-    m2_draw = packed[2 * D : 3 * D]
+    var_draw = packed[2 * D : 3 * D]
     mean_grad = packed[3 * D : 4 * D]
-    m2_grad = packed[4 * D :]
-    return position, mean_draw, m2_draw, mean_grad, m2_grad
+    var_grad = packed[4 * D :]
+    return position, mean_draw, var_draw, mean_grad, var_grad
 
 
-def _pack_adaptive_state(position, mean_draw, m2_draw, mean_grad, m2_grad):
+def _pack_adaptive_state(position, mean_draw, var_draw, mean_grad, var_grad):
     """Pack the constituent parts into a packed state x.
     Args:
         position: jnp.ndarray
         mean_draw: jnp.ndarray
-        m2_draw: jnp.ndarray
+        var_draw: jnp.ndarray
         mean_grad: jnp.ndarray
-        m2_grad: jnp.ndarray
+        var_grad: jnp.ndarray
     Returns:
         packed: jnp.ndarray
             The packed state x.
     """
     return jnp.concatenate(
-        [position, mean_draw, m2_draw, mean_grad, m2_grad]
+        [position, mean_draw, var_draw, mean_grad, var_grad]
     )
 
 
 def _welford_update_diag(
     count: jnp.ndarray,
     mean: jnp.ndarray,
-    m2_diag: jnp.ndarray,
+    var_diag: jnp.ndarray,
     x: jnp.ndarray,
 ):
-    """Online coord-wise variance accumulators updates applied at each iter; returns (count_new, mean_new, m2_diag_new)."""
+    """Online coord-wise (mean, variance) update; returns ``(count_new, mean_new, var_new)``.
+
+    Equivalent in value to classical Welford ``(mean, ssq)`` with
+    ``var = ssq / (n - 1)`` for ``n > 1``, but stores variance in the state so
+    DEER Jacobians differ from the ``ssq`` parameterization.
+    """
     n_new = count + 1.0
     delta = x - mean
     mean_new = mean + delta / n_new
-    m2_new = m2_diag + delta * (x - mean_new)
-    return n_new, mean_new, m2_new
+    # Reconstruct ssq = var * (n - 1) only for the algebraic update, then
+    # immediately re-normalize so the carried state remains variance.
+    ssq = jnp.where(count > 1.0, var_diag * (count - 1.0), jnp.zeros_like(var_diag))
+    ssq_new = ssq + delta * (x - mean_new)
+    var_new = jnp.where(
+        n_new > 1.0,
+        ssq_new / (n_new - 1.0),
+        jnp.zeros_like(var_diag),
+    )
+    return n_new, mean_new, var_new
 
 
 def _discounted_welford_weight(
@@ -131,62 +144,60 @@ def _discounted_welford_update_diag(
     n_init: jnp.ndarray | float,
     count: jnp.ndarray,
     mean: jnp.ndarray,
-    s_diag: jnp.ndarray,
+    var_diag: jnp.ndarray,
     x: jnp.ndarray,
 ):
-    """One discounted-Welford update; ``s_diag`` stores the weighted M2 accumulator ``s``."""
+    """One discounted-Welford update; state stores variance ``s / w`` (not ``s``)."""
     n = count + 1.0
     alpha = 1.0 - 1.0 / (jnp.asarray(n_init, dtype=n.dtype) + n)
     w = _discounted_welford_weight(n_init, count)
     w_new = alpha * w + 1.0
     mean_new = mean + (x - mean) / w_new
-    s_new = alpha * s_diag + (x - mean) * (x - mean_new)
-    return count + 1.0, mean_new, s_new
+    s = jnp.where(w > 0.0, var_diag * w, jnp.zeros_like(var_diag))
+    s_new = alpha * s + (x - mean) * (x - mean_new)
+    var_new = jnp.where(w_new > 0.0, s_new / w_new, jnp.zeros_like(var_diag))
+    return count + 1.0, mean_new, var_new
 
 
-def _variance_diag_from_welford(count: jnp.ndarray, m2_diag: jnp.ndarray) -> jnp.ndarray:
-    """Unbiased sample variance per coord when count > 1; else zero."""
-    return jnp.where(
-        count > 1.0,
-        m2_diag / jnp.maximum(count - 1.0, 1.0),
-        jnp.zeros_like(m2_diag),
-    )
+def _variance_diag_from_welford(count: jnp.ndarray, var_diag: jnp.ndarray) -> jnp.ndarray:
+    """Stored Welford variance per coord when count > 1; else zero."""
+    return jnp.where(count > 1.0, var_diag, jnp.zeros_like(var_diag))
 
 
 def _variance_diag_from_discounted_welford(
     n_init: jnp.ndarray | float,
     count: jnp.ndarray,
-    s_diag: jnp.ndarray,
+    var_diag: jnp.ndarray,
 ) -> jnp.ndarray:
-    """Discounted-Welford variance estimate ``s / w`` per coordinate."""
+    """Stored discounted-Welford variance when effective weight ``w > 0``; else zero."""
     w = _discounted_welford_weight(n_init, count)
-    return jnp.where(w > 0.0, s_diag / w, jnp.zeros_like(s_diag))
+    return jnp.where(w > 0.0, var_diag, jnp.zeros_like(var_diag))
 
 
 def _variance_diag_from_accumulator(
     method: Literal["standard", "discounted"],
     count: jnp.ndarray,
-    m2_diag: jnp.ndarray,
+    var_diag: jnp.ndarray,
     *,
     n_init: jnp.ndarray | float = 0.0,
 ) -> jnp.ndarray:
     if method == "discounted":
-        return _variance_diag_from_discounted_welford(n_init, count, m2_diag)
-    return _variance_diag_from_welford(count, m2_diag)
+        return _variance_diag_from_discounted_welford(n_init, count, var_diag)
+    return _variance_diag_from_welford(count, var_diag)
 
 
 def _welford_update_accumulator(
     method: Literal["standard", "discounted"],
     count: jnp.ndarray,
     mean: jnp.ndarray,
-    m2_diag: jnp.ndarray,
+    var_diag: jnp.ndarray,
     x: jnp.ndarray,
     *,
     n_init: jnp.ndarray | float = 0.0,
 ):
     if method == "discounted":
-        return _discounted_welford_update_diag(n_init, count, mean, m2_diag, x)
-    return _welford_update_diag(count, mean, m2_diag, x)
+        return _discounted_welford_update_diag(n_init, count, mean, var_diag, x)
+    return _welford_update_diag(count, mean, var_diag, x)
 
 
 @jax.custom_jvp
@@ -357,13 +368,14 @@ class ParallelHMC:
             welford_init       - optional dict controlling how the Welford accumulator slots of the
                                  initial parallel trajectory guess are seeded (see
                                  ``_pack_init_trajectory_guess``). Recognized keys: ``\"mean\"``,
-                                 ``\"m2\"`` (draw accumulators) and, for ``\"grad\"`` mode,
-                                 ``\"grad_mean\"``/``\"grad_m2\"`` (default to the ``\"mean\"``/``\"m2\"``
-                                 specs). Each value is either a number (constant fill) or one of the
+                                 ``\"var\"`` (draw variance; ``\"m2\"`` accepted as an alias) and, for
+                                 ``\"grad\"`` mode, ``\"grad_mean\"``/``\"grad_var\"`` (aliases
+                                 ``\"grad_m2\"``; default to the ``\"mean\"``/``\"var\"`` specs).
+                                 Each value is either a number (constant fill) or one of the
                                  strings ``\"zeros\"``, ``\"ones\"``, ``\"ramp\"`` (``1..T``),
                                  ``\"positions\"`` (the trajectory guess itself; means only).
                                  Missing keys / ``None`` use defaults: means = ``zeros``,
-                                 M2/s = ``zeros``. The first sampler step uses mass
+                                 variances = ``zeros``. The first sampler step uses mass
                                  ``diag(|score(x_0)|)`` at the initial position (not Welford).
                                  Optional ``\"n_init\"`` sets the discounted-Welford offset when
                                  ``welford_method`` is ``\"discounted\"`` (overridden by
@@ -434,10 +446,10 @@ class ParallelHMC:
         D = self.D
         dtype = position.dtype
         z = jnp.zeros((D,), dtype=dtype)
-        m2 = jnp.zeros((D,), dtype=dtype)
+        var0 = jnp.zeros((D,), dtype=dtype)
         if self.adaptive_mass == "draw-only":
-            return _pack_draw_only(position, z, m2)
-        return _pack_adaptive_state(position, z, m2, z, m2)
+            return _pack_draw_only(position, z, var0)
+        return _pack_adaptive_state(position, z, var0, z, var0)
 
     def _initial_mass_diag(self, position: jnp.ndarray) -> jnp.ndarray:
         """Mass for the first adaptive draw: ``diag(|score(x)|)`` at ``position``."""
@@ -450,8 +462,8 @@ class ParallelHMC:
         count: jnp.ndarray,
         *,
         mode: Literal["draw-only", "grad"],
-        m2_draw: jnp.ndarray,
-        m2_grad: jnp.ndarray | None = None,
+        var_draw: jnp.ndarray,
+        var_grad: jnp.ndarray | None = None,
     ) -> jnp.ndarray:
         """Mass for one adaptive step; first draw uses ``diag(|score|)``."""
         welford_method = self.welford_method
@@ -459,18 +471,18 @@ class ParallelHMC:
 
         def _from_welford(_):
             draw_var = _variance_diag_from_accumulator(
-                welford_method, count, m2_draw, n_init=welford_n_init
+                welford_method, count, var_draw, n_init=welford_n_init
             )
             if mode == "draw-only":
                 return _adaptive_mass_diag("draw-only", draw_var, count=count)
-            assert m2_grad is not None
-            grad_var = _variance_diag_from_accumulator(
-                welford_method, count, m2_grad, n_init=welford_n_init
+            assert var_grad is not None
+            g_var = _variance_diag_from_accumulator(
+                welford_method, count, var_grad, n_init=welford_n_init
             )
             return _adaptive_mass_diag(
                 "grad",
                 draw_var,
-                grad_var=grad_var,
+                grad_var=g_var,
                 count=count,
             )
 
@@ -521,28 +533,30 @@ class ParallelHMC:
     def _pack_init_trajectory_guess(self, y_positions: jnp.ndarray) -> jnp.ndarray:
         """Expand an initial (T, D) trajectory guess to (T, chain_state_dim) with Welford slots.
 
-        Defaults: means = zeros, M2/s = zeros. The first chain step uses mass
+        Defaults: means = zeros, variances = zeros. The first chain step uses mass
         ``diag(|score(x_0)|)`` at the initial position.
         """
         T, D = y_positions.shape
         dtype = y_positions.dtype
         init = self.welford_init
+        var_key = init.get("var", init.get("m2"))
+        grad_var_key = init.get("grad_var", init.get("grad_m2", var_key))
 
         zeros = jnp.zeros((T, D), dtype=dtype)
         if self.adaptive_mass == "draw-only":
             means = self._resolve_welford_init(
                 init.get("mean"), zeros, shape=(T, D), dtype=dtype, positions=y_positions
             )
-            m2s = self._resolve_welford_init(
-                init.get("m2"), zeros, shape=(T, D), dtype=dtype
+            vars_ = self._resolve_welford_init(
+                var_key, zeros, shape=(T, D), dtype=dtype
             )
-            return jnp.concatenate([y_positions, means, m2s], axis=-1)
+            return jnp.concatenate([y_positions, means, vars_], axis=-1)
 
         draw_means = self._resolve_welford_init(
             init.get("mean"), zeros, shape=(T, D), dtype=dtype, positions=y_positions
         )
-        draw_m2s = self._resolve_welford_init(
-            init.get("m2"), zeros, shape=(T, D), dtype=dtype
+        draw_vars = self._resolve_welford_init(
+            var_key, zeros, shape=(T, D), dtype=dtype
         )
         grad_means = self._resolve_welford_init(
             init.get("grad_mean", init.get("mean")),
@@ -551,14 +565,14 @@ class ParallelHMC:
             dtype=dtype,
             positions=y_positions,
         )
-        grad_m2s = self._resolve_welford_init(
-            init.get("grad_m2", init.get("m2")),
+        grad_vars = self._resolve_welford_init(
+            grad_var_key,
             zeros,
             shape=(T, D),
             dtype=dtype,
         )
         return jnp.concatenate(
-            [y_positions, draw_means, draw_m2s, grad_means, grad_m2s], axis=-1
+            [y_positions, draw_means, draw_vars, grad_means, grad_vars], axis=-1
         )
 
     def _positions_only(self, states: jnp.ndarray) -> jnp.ndarray:
@@ -585,9 +599,9 @@ class ParallelHMC:
 
         unpacked = self._unpack_adaptive_state(packed_state)
         if mode == "draw-only":
-            position, mean_draw, m2_draw = unpacked
+            position, mean_draw, var_draw = unpacked
         else:
-            position, mean_draw, m2_draw, mean_grad, m2_grad = unpacked
+            position, mean_draw, var_draw, mean_grad, var_grad = unpacked
 
         # count is not carried in the state: it is exactly the number of adaptation updates
         # already applied, which (because adaptation is gated purely by t < mass_adapt_steps)
@@ -598,15 +612,15 @@ class ParallelHMC:
 
         if mode == "draw-only":
             mass_diag = self._adaptive_mass_diag_at_step(
-                position, count, mode="draw-only", m2_draw=m2_draw
+                position, count, mode="draw-only", var_draw=var_draw
             )
         else:
             mass_diag = self._adaptive_mass_diag_at_step(
                 position,
                 count,
                 mode="grad",
-                m2_draw=m2_draw,
-                m2_grad=m2_grad,
+                var_draw=var_draw,
+                var_grad=var_grad,
             )
 
         momentum_seed, mh_seed = jr.split(seed)
@@ -636,50 +650,50 @@ class ParallelHMC:
 
         do_adapt = t < mass_adapt_steps
         if mode == "draw-only":
-            _, mean_n, m2_n = jax.lax.cond(
+            _, mean_n, var_n = jax.lax.cond(
                 do_adapt,
                 lambda _: _welford_update_accumulator(
                     welford_method,
                     count,
                     mean_draw,
-                    m2_draw,
+                    var_draw,
                     new_position,
                     n_init=welford_n_init,
                 ),
-                lambda _: (count, mean_draw, m2_draw),
+                lambda _: (count, mean_draw, var_draw),
                 operand=None,
             )
-            return _pack_draw_only(new_position, mean_n, m2_n), g
+            return _pack_draw_only(new_position, mean_n, var_n), g
 
         grad_chain = g * new_tlp_grad + (1.0 - g) * tlp_grad
-        _, mean_draw_n, m2_draw_n = jax.lax.cond(
+        _, mean_draw_n, var_draw_n = jax.lax.cond(
             do_adapt,
             lambda _: _welford_update_accumulator(
                 welford_method,
                 count,
                 mean_draw,
-                m2_draw,
+                var_draw,
                 new_position,
                 n_init=welford_n_init,
             ),
-            lambda _: (count, mean_draw, m2_draw),
+            lambda _: (count, mean_draw, var_draw),
             operand=None,
         )
-        _, mean_grad_n, m2_grad_n = jax.lax.cond(
+        _, mean_grad_n, var_grad_n = jax.lax.cond(
             do_adapt,
             lambda _: _welford_update_accumulator(
                 welford_method,
                 count,
                 mean_grad,
-                m2_grad,
+                var_grad,
                 grad_chain,
                 n_init=welford_n_init,
             ),
-            lambda _: (count, mean_grad, m2_grad),
+            lambda _: (count, mean_grad, var_grad),
             operand=None,
         )
         return _pack_adaptive_state(
-            new_position, mean_draw_n, m2_draw_n, mean_grad_n, m2_grad_n
+            new_position, mean_draw_n, var_draw_n, mean_grad_n, var_grad_n
         ), g
 
     def _hmc_adaptive_mass(self, packed_state: jnp.ndarray, driver, params):
@@ -772,7 +786,7 @@ class ParallelHMC:
         """Sequential HMC returning the full packed chain state.
 
         Identical chain to :meth:`run_sequential_hmc`, but retains the trailing Welford
-        accumulators (draw/grad mean & M2) when ``adaptive_mass`` is active so the diagonal
+        accumulators (draw/grad mean & variance) when ``adaptive_mass`` is active so the diagonal
         mass matrix can be reconstructed. When ``adaptive_mass`` is ``None`` this is
         identical to :meth:`run_sequential_hmc` (the state is already positions only).
         """
@@ -881,9 +895,9 @@ class ParallelMALA(ParallelHMC):
 
         unpacked = self._unpack_adaptive_state(packed_state)
         if mode == "draw-only":
-            position, mean_draw, m2_draw = unpacked
+            position, mean_draw, var_draw = unpacked
         else:
-            position, mean_draw, m2_draw, mean_grad, m2_grad = unpacked
+            position, mean_draw, var_draw, mean_grad, var_grad = unpacked
 
         count = jnp.minimum(t, mass_adapt_steps).astype(position.dtype)
         welford_method = self.welford_method
@@ -891,15 +905,15 @@ class ParallelMALA(ParallelHMC):
 
         if mode == "draw-only":
             mass_diag = self._adaptive_mass_diag_at_step(
-                position, count, mode="draw-only", m2_draw=m2_draw
+                position, count, mode="draw-only", var_draw=var_draw
             )
         else:
             mass_diag = self._adaptive_mass_diag_at_step(
                 position,
                 count,
                 mode="grad",
-                m2_draw=m2_draw,
-                m2_grad=m2_grad,
+                var_draw=var_draw,
+                var_grad=var_grad,
             )
 
         new_position, grad_new, g = self._mala_propose_accept(
@@ -908,49 +922,49 @@ class ParallelMALA(ParallelHMC):
 
         do_adapt = t < mass_adapt_steps
         if mode == "draw-only":
-            _, mean_n, m2_n = jax.lax.cond(
+            _, mean_n, var_n = jax.lax.cond(
                 do_adapt,
                 lambda _: _welford_update_accumulator(
                     welford_method,
                     count,
                     mean_draw,
-                    m2_draw,
+                    var_draw,
                     new_position,
                     n_init=welford_n_init,
                 ),
-                lambda _: (count, mean_draw, m2_draw),
+                lambda _: (count, mean_draw, var_draw),
                 operand=None,
             )
-            return _pack_draw_only(new_position, mean_n, m2_n), g
+            return _pack_draw_only(new_position, mean_n, var_n), g
 
-        _, mean_draw_n, m2_draw_n = jax.lax.cond(
+        _, mean_draw_n, var_draw_n = jax.lax.cond(
             do_adapt,
             lambda _: _welford_update_accumulator(
                 welford_method,
                 count,
                 mean_draw,
-                m2_draw,
+                var_draw,
                 new_position,
                 n_init=welford_n_init,
             ),
-            lambda _: (count, mean_draw, m2_draw),
+            lambda _: (count, mean_draw, var_draw),
             operand=None,
         )
-        _, mean_grad_n, m2_grad_n = jax.lax.cond(
+        _, mean_grad_n, var_grad_n = jax.lax.cond(
             do_adapt,
             lambda _: _welford_update_accumulator(
                 welford_method,
                 count,
                 mean_grad,
-                m2_grad,
+                var_grad,
                 grad_new,
                 n_init=welford_n_init,
             ),
-            lambda _: (count, mean_grad, m2_grad),
+            lambda _: (count, mean_grad, var_grad),
             operand=None,
         )
         return _pack_adaptive_state(
-            new_position, mean_draw_n, m2_draw_n, mean_grad_n, m2_grad_n
+            new_position, mean_draw_n, var_draw_n, mean_grad_n, var_grad_n
         ), g
 
     def _mala_adaptive_mass(self, packed_state, driver, params):

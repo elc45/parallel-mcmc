@@ -1,14 +1,14 @@
 """Sensitivity of adaptive MALA trajectories to tiny initial-state perturbations.
 
 Runs sequential adaptive MALA twice with identical RNG drivers but slightly
-different packed initial states ``(position, Welford mean, Welford M2)``. Plots
-how a small delta in the initial chain / mass-matrix state amplifies (or not)
+different packed initial states ``(position, Welford mean, Welford variance)``.
+Plots how a small delta in the initial chain / mass-matrix state amplifies (or not)
 over the trajectory.
 
 Run:
     uv run examples/experiment_mala_ic_sensitivity.py
     uv run examples/experiment_mala_ic_sensitivity.py --compare-all-perturbs
-    uv run examples/experiment_mala_ic_sensitivity.py --delta 1e-8 --perturb welford_m2
+    uv run examples/experiment_mala_ic_sensitivity.py --delta 1e-8 --perturb welford_var
 """
 
 from __future__ import annotations
@@ -69,9 +69,9 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--perturb",
-        choices=("position", "welford_mean", "welford_m2", "all"),
+        choices=("position", "welford_mean", "welford_var", "welford_m2", "all"),
         default="all",
-        help="Which packed slots receive the perturbation.",
+        help="Which packed slots receive the perturbation. ``welford_m2`` is an alias for ``welford_var``.",
     )
     parser.add_argument(
         "--chain-length",
@@ -93,7 +93,11 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-PERTURB_CHOICES = ("position", "welford_mean", "welford_m2", "all")
+PERTURB_CHOICES = ("position", "welford_mean", "welford_var", "all")
+
+
+def _normalize_perturb(perturb: str) -> str:
+    return "welford_var" if perturb == "welford_m2" else perturb
 
 
 def _perturb_packed_y0(
@@ -104,19 +108,20 @@ def _perturb_packed_y0(
     perturb: str,
 ) -> jnp.ndarray:
     """Apply a tiny coordinate-wise perturbation to packed draw-only state."""
-    position, mean, m2 = _unpack_draw_only(packed_y0, D)
+    perturb = _normalize_perturb(perturb)
+    position, mean, var = _unpack_draw_only(packed_y0, D)
     direction = jnp.ones_like(position) / jnp.sqrt(float(D))
     if perturb == "position":
         position = position + delta * direction
     elif perturb == "welford_mean":
         mean = mean + delta * direction
-    elif perturb == "welford_m2":
-        m2 = m2 + delta * direction
+    elif perturb == "welford_var":
+        var = var + delta * direction
     else:
         position = position + delta * direction
         mean = mean + delta * direction
-        m2 = m2 + delta * direction
-    return _pack_draw_only(position, mean, m2)
+        var = var + delta * direction
+    return _pack_draw_only(position, mean, var)
 
 
 def _run_sequential_from_packed(

@@ -2,11 +2,11 @@
   "chain_length": 1000,
   "random_seed": 123,
   "initial_state_scale": 2.0,
-  "adaptive_mass": null,
-  "welford_method": "discounted",
-  "epsilon": 1.5,
-  "num_leapfrog_steps": 32,
+  "adaptive_mass": "grad",
+  "welford_method": "standard",
+  "epsilon": 0.05,
+  "num_leapfrog_steps": 8,
   "mass_adapt_steps": 1000,
-  "sigmoid_accept": false,
+  "sigmoid_accept": true,
   "compute_lyapunov": true
 }

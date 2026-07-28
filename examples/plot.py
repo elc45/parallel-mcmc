@@ -14,18 +14,18 @@ import numpy as np
 
 def _welford_variance(
     count: float,
-    m2_diag: np.ndarray,
+    var_diag: np.ndarray,
     *,
     welford_method: str = "standard",
     welford_n_init: float = 0.0,
 ) -> np.ndarray:
-    """Online variance per coordinate from Welford accumulators."""
+    """Online variance per coordinate from packed Welford variance slots."""
     from src.util import _variance_diag_from_accumulator_np
 
     return _variance_diag_from_accumulator_np(
         welford_method,  # type: ignore[arg-type]
         np.asarray(count),
-        m2_diag,
+        var_diag,
         n_init=welford_n_init,
     )
 
@@ -601,7 +601,7 @@ def _newton_gif_frame_indices(num_newton_iters: int, max_frames: int = 250) -> n
 
 
 def mass_matrix_convergence_gif(
-    m2_draw: np.ndarray,
+    var_draw: np.ndarray,
     savepath: Path | str,
     *,
     count: np.ndarray,
@@ -615,10 +615,10 @@ def mass_matrix_convergence_gif(
 
     Parameters
     ----------
-    m2_draw
-        Welford M2 accumulator for draws, shape ``(num_newton_iters, chain_length, D)``.
-        ``m2_draw[k, i, d]`` is the running sum-of-squared-deviations for dimension ``d``
-        at chain index ``i`` and Newton iteration ``k``.
+    var_draw
+        Packed draw Welford variance, shape ``(num_newton_iters, chain_length, D)``.
+        ``var_draw[k, i, d]`` is the running variance for dimension ``d`` at chain
+        index ``i`` and Newton iteration ``k``.
     savepath
         Output path for the GIF file.
     count
@@ -635,23 +635,23 @@ def mass_matrix_convergence_gif(
     """
     import imageio
 
-    m2_draw = np.asarray(m2_draw)
+    var_draw = np.asarray(var_draw)
     count = np.asarray(count)
     if max_newton_iter is not None:
-        n_keep = min(int(max_newton_iter) + 1, m2_draw.shape[0])
-        m2_draw = m2_draw[:n_keep]
+        n_keep = min(int(max_newton_iter) + 1, var_draw.shape[0])
+        var_draw = var_draw[:n_keep]
         count = count[:n_keep]
-    num_newton_iters, chain_length, D = m2_draw.shape
+    num_newton_iters, chain_length, D = var_draw.shape
     gif_frames = []
 
     for newt_iter in _newton_gif_frame_indices(num_newton_iters, max_frames):
-        m2s = m2_draw[newt_iter]  # (chain_length, D)
+        vars_ = var_draw[newt_iter]  # (chain_length, D)
         counts = np.asarray(count[newt_iter]).reshape(-1)
         variance_diag = np.stack(
             [
                 _welford_variance(
                     c,
-                    m2s[i],
+                    vars_[i],
                     welford_method=welford_method,
                     welford_n_init=welford_n_init,
                 )

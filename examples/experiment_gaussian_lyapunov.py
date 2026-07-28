@@ -140,7 +140,7 @@ def main() -> None:
     print(f"Gaussian Lyapunov experiment  T={chain_length:,}  D={D}  epsilon={params['epsilon']}")
     print("=" * 72)
 
-    # Adaptive MALA: full packed state (position + Welford mean + M2)
+    # Adaptive MALA: full packed state (position + Welford mean + variance)
     sampler_adapt = samplers.ParallelMALA(
         target.log_prob,
         D,
