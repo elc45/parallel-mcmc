@@ -8,11 +8,19 @@
 #     http://www.apache.org/licenses/LICENSE-2.0
 """NUTS kernel with stop-gradient softmax proposal averaging.
 
-Forward pass matches BlackJAX multinomial NUTS (discrete progressive sampling).
-Backward pass differentiates a softmax-weighted average of every integrator
-state encountered while building the orbit, with weights proportional to
-``exp(-H(theta, momentum))`` (equivalently softmax of the per-state NUTS
-proposal weights ``H0 - H``).
+Forward pass matches BlackJAX multinomial NUTS (discrete progressive sampling,
+including biased inter-subtree updates).
+
+Backward pass differentiates the softmax-weighted average of the *choosable*
+orbit: every integrator state that discrete NUTS may select on this transition
+(initial state plus states from accepted subtrees), with unnormalized log-weights
+``P_i = H0 - H_i``. Equivalently
+
+``soft = sum_i state_i * softmax(P)_i``.
+
+Turning / diverging subtrees are excluded, since those states are not proposal
+candidates. The online ``SoftAvgState`` is only a memory-efficient way to form
+that same average.
 
 The blend uses the same ``stop_gradient`` trick as :func:`src.samplers.sigmoid_accept`:
 on the forward pass the discrete sample is returned unchanged; on the backward
@@ -78,10 +86,11 @@ class NUTSInfo(NamedTuple):
 
 
 class SoftAvgState(NamedTuple):
-    """Online softmax-weighted average of encountered integrator states.
+    """Online softmax-weighted average of choosable orbit states.
 
-    ``log_weight_sum`` is ``logsumexp`` of the per-state weights ``H0 - H``,
-    so the implied mixture is ``softmax(-H)`` up to the constant ``H0``.
+    ``log_weight_sum`` is ``logsumexp`` of member weights ``P_i = H0 - H_i``,
+    so ``state`` equals ``sum_i state_i * softmax(P)_i`` over states folded in
+    so far.
     """
 
     state: IntegratorState
@@ -93,7 +102,7 @@ def update_soft_average(
     new_state: IntegratorState,
     new_weight: float,
 ) -> SoftAvgState:
-    """Fold one proposal into the running softmax-weighted average."""
+    """Fold one state into the running softmax-weighted average."""
     log_weight_sum = jnp.logaddexp(soft_avg.log_weight_sum, new_weight)
     alpha = jnp.exp(new_weight - log_weight_sum)
     avg_state = jax.tree_util.tree_map(
@@ -105,7 +114,7 @@ def update_soft_average(
 
 
 def merge_soft_averages(left: SoftAvgState, right: SoftAvgState) -> SoftAvgState:
-    """Merge two online softmax averages (associative)."""
+    """Associative merge of two softmax averages (union of their supports)."""
     log_weight_sum = jnp.logaddexp(left.log_weight_sum, right.log_weight_sum)
     alpha_right = jnp.exp(right.log_weight_sum - log_weight_sum)
     avg_state = jax.tree_util.tree_map(
@@ -192,7 +201,7 @@ def dynamic_progressive_integration(
             new_proposal = generate_proposal(initial_energy, new_state)
             is_diverging = -new_proposal.weight > divergence_threshold
 
-            # Every newly integrated state is an encountered potential proposal.
+            # Fold into the subtree softmax average (choosable if subtree accepted).
             soft_avg = update_soft_average(soft_avg, new_state, new_proposal.weight)
 
             (new_trajectory, sampled_proposal) = jax.lax.cond(
@@ -276,7 +285,7 @@ def dynamic_multiplicative_expansion(
     max_num_expansions: int = 10,
     rate: int = 2,
 ) -> Callable:
-    """Like BlackJAX ``dynamic_multiplicative_expansion``, merging soft averages."""
+    """Like BlackJAX ``dynamic_multiplicative_expansion``, with softmax soft avg."""
     proposal_sampler = progressive_biased_sampling
 
     def expand(
@@ -324,10 +333,6 @@ def dynamic_multiplicative_expansion(
                 initial_energy,
             )
 
-            # Soft average always absorbs encountered subtree states, even when
-            # the discrete proposal rejects a turning/diverging subtree.
-            soft_avg = merge_soft_averages(soft_avg, subtree_soft_avg)
-
             def update_sum_log_p_accept(inputs):
                 _, prop, new_prop = inputs
                 return Proposal(
@@ -337,8 +342,19 @@ def dynamic_multiplicative_expansion(
                     jnp.logaddexp(prop.sum_log_p_accept, new_prop.sum_log_p_accept),
                 )
 
+            # Softmax average over the choosable orbit only: skip turning /
+            # diverging subtrees (not proposal candidates); otherwise multinomial
+            # merge (= softmax over the union).
+            reject_subtree = is_diverging | is_turning_subtree
+            soft_avg = jax.lax.cond(
+                reject_subtree,
+                lambda xs: xs[0],
+                lambda xs: merge_soft_averages(xs[0], xs[1]),
+                operand=(soft_avg, subtree_soft_avg),
+            )
+
             updated_proposal = jax.lax.cond(
-                is_diverging | is_turning_subtree,
+                reject_subtree,
                 update_sum_log_p_accept,
                 lambda x: proposal_sampler(*x),
                 operand=(proposal_key, proposal_, new_proposal),
@@ -382,7 +398,7 @@ def iterative_nuts_proposal(
     max_num_expansions: int = 10,
     divergence_threshold: float = 1000,
 ) -> Callable:
-    """Iterative NUTS proposal with stop-gradient softmax averaging."""
+    """Iterative NUTS proposal with stop-gradient softmax orbit averaging."""
     (
         new_termination_state,
         update_termination_state,
@@ -419,7 +435,7 @@ def iterative_nuts_proposal(
             initial_state.momentum,
             0,
         )
-        # Include the orbit's starting state in the soft average.
+        # Softmax average starts with the choosable initial state (weight 0).
         initial_soft_avg = SoftAvgState(initial_state, 0.0)
         initial_expansion_state = DynamicExpansionState(
             0,
@@ -439,8 +455,8 @@ def iterative_nuts_proposal(
             jnp.exp(sampled_proposal.sum_log_p_accept) / new_trajectory.num_states
         )
 
-        # Discrete multinomial sample on the forward pass; softmax-weighted
-        # average of all encountered proposals on the backward pass.
+        # Discrete progressive sample on the forward pass; softmax average over
+        # the choosable orbit on the backward pass.
         blended_state = stop_gradient_blend(soft_avg.state, sampled_proposal.state)
 
         nuts_info = NUTSInfo(
@@ -463,7 +479,7 @@ def build_kernel(
     integrator: Callable = integrators.velocity_verlet,
     divergence_threshold: int = 1000,
 ):
-    """Build an iterative NUTS kernel with stop-gradient softmax averaging."""
+    """Build an iterative NUTS kernel with stop-gradient softmax orbit averaging."""
 
     def kernel(
         rng_key: PRNGKey,

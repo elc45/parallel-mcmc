@@ -1,8 +1,8 @@
 """Run parallel NUTS (BlackJAX No-U-Turn Sampler) with DEER.
 
-Each chain transition is one BlackJAX NUTS kernel step. Produces progress,
-Newton-error and residual plots, a position-convergence GIF, Lyapunov diagnostics,
-and saved ``.npy`` arrays.
+Each chain transition is one NUTS kernel step. Set ``sigmoid_accept`` in the
+sampler config (default true) to use :mod:`src.nuts` stop-gradient softmax
+orbit averaging; if false, use stock ``blackjax.mcmc.nuts``.
 
 Run:
     uv run examples/run_nuts.py
@@ -88,6 +88,7 @@ params = {
     "step_size": float(cfg.get("step_size", cfg.get("epsilon", 0.5))),
     "max_num_doublings": int(cfg.get("max_num_doublings", 10)),
 }
+sigmoid_accept = bool(cfg.get("sigmoid_accept", True))
 
 if "inverse_mass_matrix" in cfg:
     inverse_mass_matrix = jnp.asarray(cfg["inverse_mass_matrix"], dtype=jnp.float64)
@@ -108,6 +109,7 @@ sampler = samplers.ParallelNUTS(
     clip_val=clip_val,
     max_num_doublings=params["max_num_doublings"],
     inverse_mass_matrix=inverse_mass_matrix,
+    sigmoid_accept=sigmoid_accept,
 )
 
 run_sequential = jax.jit(sampler.run_sequential_nuts_with_accepts)
@@ -133,10 +135,12 @@ sampler = samplers.ParallelNUTS(
     clip_val=clip_val,
     max_num_doublings=params["max_num_doublings"],
     inverse_mass_matrix=inverse_mass_matrix,
+    sigmoid_accept=sigmoid_accept,
 )
 
+accept_label = "src.nuts STE" if sigmoid_accept else "blackjax nuts"
 trace_label = "full Newton trace" if full_trace else "final trajectory only"
-print(f"Running parallel NUTS ({trace_label})")
+print(f"Running parallel NUTS ({trace_label}, {accept_label})")
 (states_par, iters, newton_hist), _ = run_timed_deer(
     sampler.run_parallel_nuts,
     key,
