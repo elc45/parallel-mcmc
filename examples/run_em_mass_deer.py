@@ -1,18 +1,28 @@
-"""EM-style mass adaptation alternating with single DEER Newton steps.
+"""EM-style mass adaptation alternating with single fixed-point steps.
 
 Instead of online Welford mass adaptation inside the Markov transition, alternate:
 
-  1. Run **one** DEER Newton iteration with a fixed diagonal mass ``M``.
+  1. Run **one** fixed-point iteration with a fixed diagonal mass ``M``.
   2. Set ``M <- inv(diag(empirical covariance of the trajectory positions))``,
      i.e. ``M_ii = 1 / Var_t(X_t,i)`` (Stan / BlackJAX draw-only convention).
-  3. Warm-start the next Newton step from that trajectory and repeat.
+  3. Warm-start the next step from that trajectory and repeat.
+
+The fixed-point update can be:
+
+  * ``full`` / ``quasi`` — one DEER Newton (or diagonal quasi-Newton) step
+  * ``jacobi`` — ``x^{(i+1)}_t = f_t(x^{(i)}_{t-1})``
+  * ``picard`` — ``x^{(i+1)}_t = x^{(i+1)}_{t-1} + f_t(x^{(i)}_{t-1}) - x^{(i)}_{t-1}``
+    (equivalently ``A_t = I``, solved via ``cumsum``)
 
 The HMC transition and EM loop live entirely in this script; only ``src.deer``
-is used from the core library (no changes to ``samplers.py``).
+is used from the core library for Newton / quasi-Newton (no changes to
+``samplers.py``). Jacobi and Picard are implemented here, matching the
+updates in ``sequence-parallel-mcmc-jasa/samplers.py``.
 
 Run:
     python examples/run_em_mass_deer.py
-    python examples/run_em_mass_deer.py --target gaussian_10d --em-iters 20 --T 500
+    python examples/run_em_mass_deer.py --solver jacobi --target gaussian_10d --em-iters 20 --T 500
+    python examples/run_em_mass_deer.py --solver picard --target gaussian_10d
 """
 
 from __future__ import annotations
@@ -20,6 +30,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+from typing import Literal
 
 import jax
 import jax.numpy as jnp
@@ -41,6 +52,8 @@ jax.config.update("jax_default_matmul_precision", "highest")
 
 _MASS_LOWER = 1e-20
 _MASS_UPPER = 1e20
+
+SolverType = Literal["full", "quasi", "jacobi", "picard"]
 
 
 # --------------------------------------------------------------------------- #
@@ -131,6 +144,47 @@ def mass_from_trajectory(
 
 
 # --------------------------------------------------------------------------- #
+#                    Jacobi / Picard one-step fixed-point updates              #
+# --------------------------------------------------------------------------- #
+def _shift_trajectory(y0: jnp.ndarray, yt: jnp.ndarray) -> jnp.ndarray:
+    """``[y0, y_0, ..., y_{T-2}]`` — lagged states for evaluating ``f_t``."""
+    return jnp.concatenate((y0[None, :], yt[:-1, :]), axis=0)
+
+
+def _vmap_f(hmc_fn, y_tm1, drivers, params):
+    return jax.vmap(lambda y, d: hmc_fn(y, d, params))(y_tm1, drivers)
+
+
+def fixed_point_residual_sq(hmc_fn, y0, drivers, params, yt) -> jnp.ndarray:
+    """``||Y - f(shift(Y))||^2`` for a candidate trajectory."""
+    y_tm1 = _shift_trajectory(y0, yt)
+    f_vals = _vmap_f(hmc_fn, y_tm1, drivers, params)
+    return jnp.sum(jnp.square(yt - f_vals))
+
+
+def jacobi_step(hmc_fn, y0, drivers, params, guess):
+    """One Jacobi iteration: ``x^{(i+1)}_t = f_t(x^{(i)}_{t-1})`` (``A_t = 0``)."""
+    y_tm1 = _shift_trajectory(y0, guess)
+    yt = _vmap_f(hmc_fn, y_tm1, drivers, params)
+    res = fixed_point_residual_sq(hmc_fn, y0, drivers, params, yt)
+    return yt, res
+
+
+def picard_step(hmc_fn, y0, drivers, params, guess):
+    """One Picard iteration with ``A_t = I``.
+
+    ``x^{(i+1)}_t = x^{(i+1)}_{t-1} + f_t(x^{(i)}_{t-1}) - x^{(i)}_{t-1}``,
+    solved in parallel via ``cumsum`` (same as JASA ``solver="picard"``).
+    """
+    y_tm1 = _shift_trajectory(y0, guess)
+    f_vals = _vmap_f(hmc_fn, y_tm1, drivers, params)
+    b = f_vals - y_tm1
+    yt = y0 + jnp.cumsum(b, axis=0)
+    res = fixed_point_residual_sq(hmc_fn, y0, drivers, params, yt)
+    return yt, res
+
+
+# --------------------------------------------------------------------------- #
 #                                   EM loop                                    #
 # --------------------------------------------------------------------------- #
 def run_em(
@@ -141,21 +195,22 @@ def run_em(
     init_guess: jnp.ndarray,
     params: dict,
     em_iters: int,
+    solver: SolverType,
     deer_kwargs: dict,
 ):
-    """Alternate one DEER Newton step with a global mass update from the trajectory.
+    """Alternate one fixed-point step with a global mass update from the trajectory.
 
     Returns
     -------
     trajectories : list[np.ndarray]
-        Position trajectory after each EM outer iteration (each is one Newton step).
+        Position trajectory after each EM outer iteration (each is one solver step).
     masses : list[np.ndarray]
-        Diagonal mass used for that Newton step (length ``em_iters``); the mass
+        Diagonal mass used for that solver step (length ``em_iters``); the mass
         derived from the final trajectory is appended as well (length ``em_iters + 1``
-        if you want the last update — here we return masses *before* each Newton,
+        if you want the last update — here we return masses *before* each step,
         plus the mass after the last update).
     residuals : list[float]
-        Fixed-point residual ``||Y - f(shift(Y))||^2`` after each Newton step.
+        Fixed-point residual ``||Y - f(shift(Y))||^2`` after each solver step.
     """
     mass_diag = jnp.asarray(params["mass_diag"])
     guess = init_guess
@@ -163,35 +218,67 @@ def run_em(
     masses = [np.asarray(mass_diag)]
     residuals = []
 
-    # One Newton step per call: max_iter=1, warm-start from previous Y.
-    step_fn = jax.jit(
-        lambda guess, mass: deer.seq1d(
-            func=hmc_fn,
-            y0=y0,
-            xinp=drivers,
-            params={**params, "mass_diag": mass},
-            init_trajectory_guess=guess,
-            max_iter=1,
-            full_trace=False,
-            **deer_kwargs,
+    if solver in ("full", "quasi"):
+        # One Newton / quasi-Newton step per call: max_iter=1, warm-start from previous Y.
+        step_fn = jax.jit(
+            lambda guess, mass: deer.seq1d(
+                func=hmc_fn,
+                y0=y0,
+                xinp=drivers,
+                params={**params, "mass_diag": mass},
+                init_trajectory_guess=guess,
+                max_iter=1,
+                full_trace=False,
+                quasi=(solver == "quasi"),
+                **deer_kwargs,
+            )
         )
-    )
+
+        def take_step(guess, mass_diag):
+            yt, _iters, newton_hist = step_fn(guess, mass_diag)
+            if newton_hist is not None:
+                # residual_sq[0] is the initial guess; [1] is after the single Newton step.
+                res = float(np.asarray(newton_hist.residual_sq)[1])
+            else:
+                res = float("nan")
+            return yt, res
+
+    elif solver == "jacobi":
+        step_fn = jax.jit(
+            lambda guess, mass: jacobi_step(
+                hmc_fn, y0, drivers, {**params, "mass_diag": mass}, guess
+            )
+        )
+
+        def take_step(guess, mass_diag):
+            yt, res = step_fn(guess, mass_diag)
+            return yt, float(np.asarray(res))
+
+    elif solver == "picard":
+        step_fn = jax.jit(
+            lambda guess, mass: picard_step(
+                hmc_fn, y0, drivers, {**params, "mass_diag": mass}, guess
+            )
+        )
+
+        def take_step(guess, mass_diag):
+            yt, res = step_fn(guess, mass_diag)
+            return yt, float(np.asarray(res))
+
+    else:
+        raise ValueError(
+            f"Unknown solver '{solver}'; expected one of full, quasi, jacobi, picard."
+        )
 
     for k in range(em_iters):
-        yt, _iters, newton_hist = step_fn(guess, mass_diag)
+        yt, res = take_step(guess, mass_diag)
         yt_np = np.asarray(yt)
         trajectories.append(yt_np)
-
-        if newton_hist is not None:
-            # residual_sq[0] is the initial guess; [1] is after the single Newton step.
-            res = float(np.asarray(newton_hist.residual_sq)[1])
-        else:
-            res = float("nan")
         residuals.append(res)
 
         mass_diag = mass_from_trajectory(yt)
         masses.append(np.asarray(mass_diag))
-        guess = yt  # warm-start next Newton from this trajectory
+        guess = yt  # warm-start next solver step from this trajectory
 
         print(
             f"  EM {k + 1:3d}/{em_iters}: "
@@ -223,10 +310,22 @@ def main():
     parser.add_argument("--num-leapfrog-steps", type=int, default=8)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--initial-state-scale", type=float, default=2.0)
+    parser.add_argument(
+        "--solver",
+        choices=["full", "quasi", "jacobi", "picard"],
+        default="full",
+        help=(
+            "fixed-point update: full/quasi DEER Newton, or Jacobi (A=0) / Picard (A=I)"
+        ),
+    )
+    parser.add_argument(
+        "--quasi",
+        action="store_true",
+        help="alias for --solver quasi (kept for backward compatibility)",
+    )
     parser.add_argument("--damp-factor", type=float, default=1.0)
     parser.add_argument("--tol", type=float, default=1e-5)
     parser.add_argument("--rtol", type=float, default=1e-5)
-    parser.add_argument("--quasi", action="store_true", help="use diagonal-Jacobian DEER")
     parser.add_argument("--clip-val", type=float, default=1e8)
     parser.add_argument(
         "--sigmoid-accept",
@@ -240,6 +339,8 @@ def main():
     )
     parser.add_argument("--no-plot", action="store_true")
     args = parser.parse_args()
+
+    solver: SolverType = "quasi" if args.quasi else args.solver
 
     target = load_target(args.target)
     D = target.dim
@@ -258,22 +359,29 @@ def main():
         "num_leapfrog_steps": args.num_leapfrog_steps,
         "mass_diag": mass0,
     }
+    # DEER-only kwargs (ignored by Jacobi / Picard).
     deer_kwargs = dict(
         damp_factor=args.damp_factor,
         tol=args.tol,
         rtol=args.rtol,
-        quasi=args.quasi,
         qmem_efficient=False,
         clip_val=args.clip_val,
     )
 
     hmc_fn = make_hmc_fn(log_prob, sigmoid_accept=args.sigmoid_accept)
 
+    solver_label = {
+        "full": "DEER (full Newton)",
+        "quasi": "DEER (quasi-Newton)",
+        "jacobi": "Jacobi (A=0)",
+        "picard": "Picard (A=I)",
+    }[solver]
+
     print("=" * 72)
-    print("EM mass adaptation × DEER (one Newton per outer step)")
+    print(f"EM mass adaptation × {solver_label} (one step per outer iter)")
     print(
         f"  target={target.name}  D={D}  T={args.T}  em_iters={args.em_iters}  "
-        f"quasi={args.quasi}"
+        f"solver={solver}"
     )
     print("=" * 72)
 
@@ -284,6 +392,7 @@ def main():
         init_guess=init_guess,
         params=params,
         em_iters=args.em_iters,
+        solver=solver,
         deer_kwargs=deer_kwargs,
     )
 
@@ -301,10 +410,10 @@ def main():
         seq = None
 
     if not args.no_plot:
-        make_plots(trajectories, masses, residuals, seq, args, target.name)
+        make_plots(trajectories, masses, residuals, seq, args, target.name, solver)
 
 
-def make_plots(trajectories, masses, residuals, seq, args, target_name):
+def make_plots(trajectories, masses, residuals, seq, args, target_name, solver):
     import matplotlib
 
     matplotlib.use("Agg")
@@ -320,7 +429,7 @@ def make_plots(trajectories, masses, residuals, seq, args, target_name):
     ax.semilogy(np.arange(1, len(residuals) + 1), residuals, marker="o", ms=3)
     ax.set_xlabel("EM outer iteration")
     ax.set_ylabel(r"fixed-point residual $||Y - f||^2$")
-    ax.set_title("Newton residual after each EM step")
+    ax.set_title(f"{solver} residual after each EM step")
     ax.grid(True, alpha=0.3)
 
     ax = axes[1]
@@ -347,15 +456,17 @@ def make_plots(trajectories, masses, residuals, seq, args, target_name):
     ax.legend()
     ax.grid(True, alpha=0.3)
 
-    fig.suptitle(f"EM–DEER mass adaptation — {target_name} (T={args.T})", y=1.02)
+    fig.suptitle(
+        f"EM–{solver} mass adaptation — {target_name} (T={args.T})", y=1.02
+    )
     fig.tight_layout()
-    path = out_dir / f"em_mass_{target_name}_T{args.T}_K{args.em_iters}.png"
+    path = out_dir / f"em_mass_{target_name}_{solver}_T{args.T}_K{args.em_iters}.png"
     fig.savefig(path, dpi=130, bbox_inches="tight")
     print(f"\nSaved figure to {path}")
 
-    np.save(out_dir / f"em_masses_{target_name}.npy", mass_arr)
-    np.save(out_dir / f"em_residuals_{target_name}.npy", np.asarray(residuals))
-    np.save(out_dir / f"em_final_traj_{target_name}.npy", final)
+    np.save(out_dir / f"em_masses_{target_name}_{solver}.npy", mass_arr)
+    np.save(out_dir / f"em_residuals_{target_name}_{solver}.npy", np.asarray(residuals))
+    np.save(out_dir / f"em_final_traj_{target_name}_{solver}.npy", final)
 
 
 if __name__ == "__main__":
