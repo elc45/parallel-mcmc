@@ -7,7 +7,7 @@ from collections.abc import Callable
 from typing import Literal
 
 import src
-from src import deer, windowed_qdeer
+from src import deer
 
 def sigmoid_accept(x):
     """
@@ -1541,12 +1541,49 @@ class ParallelLangevin:
         return out_states, iters, newton_hist
 
 
+def _patch_jnp_clip_max_keyword() -> None:
+    """Make ``jnp.clip(..., max=...)`` work on older and newer JAX.
+
+    BlackJAX uses the NumPy-2 style ``max=`` / ``min=`` keywords. Older JAX only
+    accepts ``a_max`` / ``a_min``. Probe once and only wrap when needed so modern
+    JAX (e.g. on HPC) is left untouched.
+    """
+    if getattr(jnp.clip, "_deer_clip_compat_checked", False):
+        return
+
+    try:
+        jnp.clip(jnp.asarray(0.0), max=1.0)
+    except TypeError:
+        _orig_clip = jnp.clip
+
+        def _clip(a, a_min=None, a_max=None, max=None, min=None, **kwargs):
+            if max is not None and a_max is None:
+                a_max = max
+            if min is not None and a_min is None:
+                a_min = min
+            return _orig_clip(a, a_min=a_min, a_max=a_max, **kwargs)
+
+        _clip._deer_clip_compat_checked = True
+        jnp.clip = _clip
+    else:
+        # Native support; mark the original so we do not re-probe.
+        try:
+            jnp.clip._deer_clip_compat_checked = True
+        except (AttributeError, TypeError):
+            # Rare: clip object rejects attribute assignment; probing again is fine.
+            pass
+
+
 class ParallelNUTS:
     """Parallel DEER with BlackJAX No-U-Turn Sampler (NUTS) transitions.
 
     Each chain step runs one NUTS kernel call (multinomial trajectory sampling with
     Euclidean Gaussian kinetic energy). The DEER state is the position vector only;
     momentum is resampled inside each NUTS step, matching BlackJAX's ``nuts.step``.
+
+    If ``sigmoid_accept`` is True (default), uses :mod:`src.nuts` with stop-gradient
+    softmax orbit averaging for DEER Jacobians. If False, uses stock
+    ``blackjax.mcmc.nuts`` (discrete proposal path only under ``jacfwd``).
     """
 
     def __init__(
@@ -1566,9 +1603,14 @@ class ParallelNUTS:
         inverse_mass_matrix=1.0,
         max_num_doublings: int = 10,
         divergence_threshold: float = 1000.0,
+        sigmoid_accept: bool = True,
     ):
-        from blackjax.mcmc import nuts as blackjax_nuts
-
+        _patch_jnp_clip_max_keyword()
+        self.sigmoid_accept = bool(sigmoid_accept)
+        if self.sigmoid_accept:
+            from src import nuts as blackjax_nuts
+        else:
+            from blackjax.mcmc import nuts as blackjax_nuts
         self.log_prob = log_prob
         self.D = dim
         self.chain_length = chain_length

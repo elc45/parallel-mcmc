@@ -5,5 +5,5 @@
   "quasi": false,
   "qmem_efficient": false,
   "clip_val": 1e8,
-  "full_trace": false
+  "full_trace": true
 }

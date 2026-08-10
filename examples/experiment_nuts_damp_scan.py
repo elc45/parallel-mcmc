@@ -96,6 +96,7 @@ def _run_parallel_iters(
         qmem_efficient=deer["qmem_efficient"],
         clip_val=deer["clip_val"],
         max_num_doublings=int(params["max_num_doublings"]),
+        sigmoid_accept=bool(params.get("sigmoid_accept", True)),
     )
     init_guess = initial_state[None, :] * jnp.ones((chain_length, dim))
     run_parallel = jax.jit(sampler.run_parallel_nuts)

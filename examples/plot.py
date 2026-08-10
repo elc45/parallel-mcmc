@@ -9,6 +9,8 @@ from typing import Any, Sequence
 import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
+from matplotlib.colors import LinearSegmentedColormap, ListedColormap, LogNorm, Normalize
+from matplotlib.patches import Patch
 import numpy as np
 
 
@@ -420,6 +422,251 @@ def newton_truth_error_plot(
     ax.grid(True, alpha=0.35)
     if created_fig:
         fig.tight_layout()
+    if savepath is not None:
+        fig.savefig(savepath, dpi=150, bbox_inches="tight")
+    return fig, ax
+
+
+def newton_index_changes(
+    states_par: jnp.ndarray | np.ndarray,
+    *,
+    dim: int = 0,
+) -> np.ndarray:
+    """Absolute per-index change between consecutive Newton iterates for one state dim.
+
+    Parameters
+    ----------
+    states_par
+        Full Newton trace, shape ``(num_newton_iters + 1, T, D_or_packed)``. Index ``0`` is
+        the initial guess.
+    dim
+        Trailing state component to inspect (typically a position coordinate).
+
+    Returns
+    -------
+    changes
+        Shape ``(num_newton_iters, T)`` where ``changes[n, t] = |Y_{n+1}[t, dim] - Y_n[t, dim]|``.
+    """
+    arr = _to_numpy(states_par)
+    if arr.ndim < 3:
+        raise ValueError(
+            "newton_index_changes requires a full Newton trace "
+            f"(num_newton_iters+1, T, D); got shape {arr.shape}"
+        )
+    if not (0 <= dim < arr.shape[-1]):
+        raise ValueError(f"dim={dim} out of range for trailing size {arr.shape[-1]}")
+    return np.abs(arr[1:, :, dim] - arr[:-1, :, dim])
+
+
+def newton_index_unconverged(
+    states_par: jnp.ndarray | np.ndarray,
+    *,
+    dim: int = 0,
+    tol: float = 1e-5,
+    rtol: float = 1e-5,
+) -> np.ndarray:
+    """Per-index DEER convergence mask for one state dim.
+
+    Uses the same local residual as DEER early stopping,
+    ``|Y_n - Y_{n-1}| - rtol * |Y_{n-1}|``, compared to ``tol`` (absolute tolerance).
+
+    Returns
+    -------
+    unconverged
+        Boolean array shape ``(num_newton_iters, T)``. ``True`` means the index still
+        exceeds tolerance at that Newton step (red); ``False`` means satisfied (white).
+    """
+    arr = _to_numpy(states_par)
+    if arr.ndim < 3:
+        raise ValueError(
+            "newton_index_unconverged requires a full Newton trace "
+            f"(num_newton_iters+1, T, D); got shape {arr.shape}"
+        )
+    if not (0 <= dim < arr.shape[-1]):
+        raise ValueError(f"dim={dim} out of range for trailing size {arr.shape[-1]}")
+    prev = arr[:-1, :, dim]
+    nxt = arr[1:, :, dim]
+    residual = np.abs(nxt - prev) - float(rtol) * np.abs(prev)
+    return residual > float(tol)
+
+
+def newton_index_change_plot(
+    states_par: jnp.ndarray | np.ndarray,
+    *,
+    dim: int = 0,
+    tol: float = 1e-5,
+    rtol: float = 1e-5,
+    figsize: tuple[float, float] = (10.0, 4.5),
+    savepath: Path | str | None = None,
+    title: str | None = None,
+    ax: plt.Axes | None = None,
+) -> tuple[plt.Figure, plt.Axes]:
+    """Binary heatmap of per-index DEER convergence at each Newton iteration.
+
+    Rows are Newton updates ``1..N`` (``Y_{n-1} -> Y_n``), with iteration 1 at the top;
+    columns are chain indices ``t``. White = index satisfies ``|ΔY| - rtol|Y| <= tol``;
+    red = still changing beyond tolerance.
+    """
+    unconverged = newton_index_unconverged(
+        states_par, dim=dim, tol=tol, rtol=rtol
+    )
+    n_newt, t_len = unconverged.shape
+
+    created_fig = ax is None
+    if created_fig:
+        fig, ax = plt.subplots(figsize=figsize)
+    else:
+        fig = ax.figure
+
+    # 0 = converged (white), 1 = unconverged (red)
+    cmap = ListedColormap(["#ffffff", "#d62728"])
+    ax.imshow(
+        unconverged.astype(np.float64),
+        aspect="auto",
+        origin="upper",
+        interpolation="nearest",
+        cmap=cmap,
+        vmin=0.0,
+        vmax=1.0,
+        extent=(-0.5, t_len - 0.5, n_newt + 0.5, 0.5),
+    )
+    ax.legend(
+        handles=[
+            Patch(
+                facecolor="#ffffff",
+                edgecolor="#888888",
+                label=r"converged ($|\Delta Y| - \mathrm{rtol}|Y| \leq \mathrm{tol}$)",
+            ),
+            Patch(facecolor="#d62728", edgecolor="#888888", label="still changing"),
+        ],
+        loc="upper right",
+        fontsize=9,
+        framealpha=0.9,
+    )
+
+    ax.set_xlabel("chain index $t$", fontsize=12)
+    ax.set_ylabel("Newton iteration", fontsize=12)
+    if title is not None:
+        ax.set_title(title, fontsize=12)
+    else:
+        ax.set_title(
+            f"Per-index Newton convergence (dim={dim}, tol={tol:g}, rtol={rtol:g})",
+            fontsize=12,
+        )
+
+    if created_fig:
+        fig.tight_layout()
+    if savepath is not None:
+        fig.savefig(savepath, dpi=150, bbox_inches="tight")
+    return fig, ax
+
+
+def newton_index_change_magnitude_plot(
+    states_par: jnp.ndarray | np.ndarray,
+    *,
+    dim: int = 0,
+    sane_lo: float = 1e-12,
+    sane_hi: float = 1e12,
+    vmin_percentile: float = 50.0,
+    vmax_percentile: float = 90.0,
+    log_scale: bool = True,
+    figsize: tuple[float, float] = (16.0, 2.8),
+    aspect: float | None = 1.5,
+    savepath: Path | str | None = None,
+    title: str | None = None,
+    ax: plt.Axes | None = None,
+    cmap: str = "magma_r",
+) -> tuple[plt.Figure, plt.Axes]:
+    """Continuous heatmap of per-index ``|ΔY|`` over a robust mid-range color scale.
+
+    Same layout as :func:`newton_index_change_plot` (Newton iter 1 at top). Extreme
+    outliers (e.g. ``1e86`` / ``1e-80``) are ignored when setting the scale: only
+    finite changes inside ``[sane_lo, sane_hi]`` define ``vmin``/``vmax`` via
+    ``vmin_percentile``–``vmax_percentile``. Values below ``vmin`` are white (matching
+    converged); values above ``vmax`` saturate. Default reversed magma is anchored at
+    white so small changes fade into the converged background. ``aspect`` (default
+    ``1.5``) keeps pixels near-square on long chains; pass ``None`` for auto-fill.
+    """
+    changes = newton_index_changes(states_par, dim=dim)
+    n_newt, t_len = changes.shape
+
+    created_fig = ax is None
+    if created_fig:
+        fig, ax = plt.subplots(figsize=figsize)
+    else:
+        fig = ax.figure
+
+    def _as_percent(p: float) -> float:
+        p = float(p)
+        return p * 100.0 if 0.0 < p <= 1.0 else p
+
+    sane = changes[
+        np.isfinite(changes)
+        & (changes >= float(sane_lo))
+        & (changes <= float(sane_hi))
+    ]
+    if sane.size == 0:
+        sane = changes[np.isfinite(changes) & (changes > 0)]
+    if sane.size == 0:
+        vmin, vmax = 1e-6, 1.0
+        plot_vals = np.ma.masked_all(changes.shape)
+    else:
+        vmin = float(np.percentile(sane, _as_percent(vmin_percentile)))
+        vmax = float(np.percentile(sane, _as_percent(vmax_percentile)))
+        if not np.isfinite(vmin) or vmin <= 0:
+            vmin = float(np.min(sane))
+        if not np.isfinite(vmax) or vmax <= vmin:
+            vmax = float(np.max(sane))
+            if vmax <= vmin:
+                vmax = vmin * 10.0
+
+        clipped = np.clip(changes, vmin, vmax)
+        in_range = np.isfinite(changes) & (changes >= vmin)
+        plot_vals = np.ma.masked_where(~in_range, clipped)
+
+    if log_scale:
+        norm = LogNorm(vmin=vmin, vmax=max(vmax, vmin * 1.0001))
+    else:
+        norm = Normalize(vmin=float(vmin), vmax=max(vmax, vmin * 1.0001))
+
+    # Anchor the low end at white so small updates blend into converged regions.
+    base = plt.get_cmap(cmap)(np.linspace(0.0, 1.0, 255))
+    colors = np.vstack([[[1.0, 1.0, 1.0, 1.0]], base])
+    cmap_obj = LinearSegmentedColormap.from_list(f"{cmap}_white", colors)
+    cmap_obj.set_bad(color="#ffffff")
+
+    im = ax.imshow(
+        plot_vals,
+        aspect="auto" if aspect is None else float(aspect),
+        origin="upper",
+        interpolation="nearest",
+        cmap=cmap_obj,
+        norm=norm,
+        extent=(-0.5, t_len - 0.5, n_newt + 0.5, 0.5),
+    )
+    cbar = fig.colorbar(im, ax=ax, pad=0.02, fraction=0.046)
+    scale_note = "log " if log_scale else ""
+    cbar.set_label(
+        rf"$|\Delta Y_{{[t,{dim}]}}|$ ({scale_note}[{vmin:.2g}, {vmax:.2g}])",
+        fontsize=11,
+    )
+
+    ax.set_xlabel("chain index $t$", fontsize=12)
+    ax.set_ylabel("Newton iteration", fontsize=12)
+    if title is not None:
+        ax.set_title(title, fontsize=12)
+    else:
+        ax.set_title(
+            f"Per-index Newton updates (dim={dim}, [{vmin:.2g}, {vmax:.2g}])",
+            fontsize=12,
+        )
+
+    if created_fig:
+        if aspect is None:
+            fig.tight_layout()
+        else:
+            # tight_layout fights a fixed data aspect on long chains; keep margins manual.
+            fig.subplots_adjust(left=0.05, right=0.93, top=0.88, bottom=0.22)
     if savepath is not None:
         fig.savefig(savepath, dpi=150, bbox_inches="tight")
     return fig, ax
