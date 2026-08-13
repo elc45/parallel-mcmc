@@ -97,6 +97,37 @@ def _pack_adaptive_state(position, mean_draw, var_draw, mean_grad, var_grad):
     )
 
 
+def _normalize_welford_parametrization(
+    parametrization: str | None,
+) -> Literal["ssq", "variance"]:
+    """Map constructor input to ``\"ssq\"`` or ``\"variance\"`` (default)."""
+    if parametrization is None:
+        return "variance"
+    key = str(parametrization).strip().lower()
+    if key in ("ssq", "m2", "sum-of-squares", "sum_of_squares"):
+        return "ssq"
+    if key in ("variance", "var"):
+        return "variance"
+    raise ValueError(
+        "welford_parametrization must be 'ssq' or 'variance' "
+        f"(got {parametrization!r})"
+    )
+
+
+def _welford_update_diag_ssq(
+    count: jnp.ndarray,
+    mean: jnp.ndarray,
+    m2_diag: jnp.ndarray,
+    x: jnp.ndarray,
+):
+    """Classical Welford: state stores sum-of-squared-deviations ``ssq``."""
+    n_new = count + 1.0
+    delta = x - mean
+    mean_new = mean + delta / n_new
+    m2_new = m2_diag + delta * (x - mean_new)
+    return n_new, mean_new, m2_new
+
+
 def _welford_update_diag(
     count: jnp.ndarray,
     mean: jnp.ndarray,
@@ -140,6 +171,23 @@ def _discounted_welford_weight(
     return jax.lax.fori_loop(0, n_int, body, w)
 
 
+def _discounted_welford_update_diag_ssq(
+    n_init: jnp.ndarray | float,
+    count: jnp.ndarray,
+    mean: jnp.ndarray,
+    s_diag: jnp.ndarray,
+    x: jnp.ndarray,
+):
+    """Discounted Welford storing the weighted M2 accumulator ``s`` (not ``s/w``)."""
+    n = count + 1.0
+    alpha = 1.0 - 1.0 / (jnp.asarray(n_init, dtype=n.dtype) + n)
+    w = _discounted_welford_weight(n_init, count)
+    w_new = alpha * w + 1.0
+    mean_new = mean + (x - mean) / w_new
+    s_new = alpha * s_diag + (x - mean) * (x - mean_new)
+    return count + 1.0, mean_new, s_new
+
+
 def _discounted_welford_update_diag(
     n_init: jnp.ndarray | float,
     count: jnp.ndarray,
@@ -159,9 +207,28 @@ def _discounted_welford_update_diag(
     return count + 1.0, mean_new, var_new
 
 
+def _variance_diag_from_welford_ssq(count: jnp.ndarray, m2_diag: jnp.ndarray) -> jnp.ndarray:
+    """Unbiased sample variance per coord from stored ``ssq`` when count > 1; else zero."""
+    return jnp.where(
+        count > 1.0,
+        m2_diag / jnp.maximum(count - 1.0, 1.0),
+        jnp.zeros_like(m2_diag),
+    )
+
+
 def _variance_diag_from_welford(count: jnp.ndarray, var_diag: jnp.ndarray) -> jnp.ndarray:
     """Stored Welford variance per coord when count > 1; else zero."""
     return jnp.where(count > 1.0, var_diag, jnp.zeros_like(var_diag))
+
+
+def _variance_diag_from_discounted_welford_ssq(
+    n_init: jnp.ndarray | float,
+    count: jnp.ndarray,
+    s_diag: jnp.ndarray,
+) -> jnp.ndarray:
+    """Discounted-Welford variance ``s / w`` from stored weighted M2 ``s``."""
+    w = _discounted_welford_weight(n_init, count)
+    return jnp.where(w > 0.0, s_diag / w, jnp.zeros_like(s_diag))
 
 
 def _variance_diag_from_discounted_welford(
@@ -180,9 +247,15 @@ def _variance_diag_from_accumulator(
     var_diag: jnp.ndarray,
     *,
     n_init: jnp.ndarray | float = 0.0,
+    parametrization: Literal["ssq", "variance"] = "variance",
 ) -> jnp.ndarray:
+    param = _normalize_welford_parametrization(parametrization)
     if method == "discounted":
+        if param == "ssq":
+            return _variance_diag_from_discounted_welford_ssq(n_init, count, var_diag)
         return _variance_diag_from_discounted_welford(n_init, count, var_diag)
+    if param == "ssq":
+        return _variance_diag_from_welford_ssq(count, var_diag)
     return _variance_diag_from_welford(count, var_diag)
 
 
@@ -194,9 +267,15 @@ def _welford_update_accumulator(
     x: jnp.ndarray,
     *,
     n_init: jnp.ndarray | float = 0.0,
+    parametrization: Literal["ssq", "variance"] = "variance",
 ):
+    param = _normalize_welford_parametrization(parametrization)
     if method == "discounted":
+        if param == "ssq":
+            return _discounted_welford_update_diag_ssq(n_init, count, mean, var_diag, x)
         return _discounted_welford_update_diag(n_init, count, mean, var_diag, x)
+    if param == "ssq":
+        return _welford_update_diag_ssq(count, mean, var_diag, x)
     return _welford_update_diag(count, mean, var_diag, x)
 
 
@@ -306,6 +385,7 @@ class ParallelHMC:
     adaptive_mass: Literal["grad", "draw-only"] | None
     welford_init: dict
     welford_method: Literal["standard", "discounted"]
+    welford_parametrization: Literal["ssq", "variance"]
     welford_n_init: float
     sigmoid_accept: bool
     chain_state_dim: int
@@ -328,6 +408,7 @@ class ParallelHMC:
                 adaptive_mass: str | bool | None = None,
                 welford_init: dict | None = None,
                 welford_method: str | None = None,
+                welford_parametrization: str | None = None,
                 welford_n_init: float | None = None,
                 sigmoid_accept: bool = True):
         '''
@@ -382,6 +463,9 @@ class ParallelHMC:
                                  constructor ``welford_n_init``).
             welford_method     - ``\"standard\"`` (default) or ``\"discounted\"`` online variance
                                  accumulator for adaptive mass.
+            welford_parametrization - ``\"variance\"`` (default on this branch): store variance
+                                 in the packed state. ``\"ssq\"``: classical Welford, store
+                                 sum-of-squared-deviations (mass values match; Jacobians differ).
             welford_n_init     - discount offset ``n^\\text{init}`` for discounted Welford
                                  (default ``0``; may also be set via ``welford_init[\"n_init\"]``).
             sigmoid_accept     - if True (default), MH accept uses :func:`sigmoid_accept`
@@ -405,6 +489,9 @@ class ParallelHMC:
         self.adaptive_mass = _normalize_adaptive_mass(adaptive_mass)
         self.welford_init = dict(welford_init) if welford_init else {}
         self.welford_method = welford_method
+        self.welford_parametrization = _normalize_welford_parametrization(
+            welford_parametrization
+        )
         init_n = self.welford_init.get("n_init", 0.0)
         self.welford_n_init = float(
             welford_n_init if welford_n_init is not None else init_n
@@ -414,6 +501,18 @@ class ParallelHMC:
             _packed_state_dim(dim, self.adaptive_mass)
             if self.adaptive_mass is not None
             else dim
+        )
+
+    def _update_welford_accumulators(self, count, mean, acc, x):
+        """One Welford update using this sampler's method and parametrization."""
+        return _welford_update_accumulator(
+            self.welford_method,
+            count,
+            mean,
+            acc,
+            x,
+            n_init=jnp.asarray(self.welford_n_init, dtype=count.dtype),
+            parametrization=self.welford_parametrization,
         )
 
     def _mh_accept_indicator(self, log_accept_ratio, u, dtype):
@@ -471,13 +570,21 @@ class ParallelHMC:
 
         def _from_welford(_):
             draw_var = _variance_diag_from_accumulator(
-                welford_method, count, var_draw, n_init=welford_n_init
+                welford_method,
+                count,
+                var_draw,
+                n_init=welford_n_init,
+                parametrization=self.welford_parametrization,
             )
             if mode == "draw-only":
                 return _adaptive_mass_diag("draw-only", draw_var, count=count)
             assert var_grad is not None
             g_var = _variance_diag_from_accumulator(
-                welford_method, count, var_grad, n_init=welford_n_init
+                welford_method,
+                count,
+                var_grad,
+                n_init=welford_n_init,
+                parametrization=self.welford_parametrization,
             )
             return _adaptive_mass_diag(
                 "grad",
@@ -652,13 +759,8 @@ class ParallelHMC:
         if mode == "draw-only":
             _, mean_n, var_n = jax.lax.cond(
                 do_adapt,
-                lambda _: _welford_update_accumulator(
-                    welford_method,
-                    count,
-                    mean_draw,
-                    var_draw,
-                    new_position,
-                    n_init=welford_n_init,
+                lambda _: self._update_welford_accumulators(
+                    count, mean_draw, var_draw, new_position
                 ),
                 lambda _: (count, mean_draw, var_draw),
                 operand=None,
@@ -668,26 +770,16 @@ class ParallelHMC:
         grad_chain = g * new_tlp_grad + (1.0 - g) * tlp_grad
         _, mean_draw_n, var_draw_n = jax.lax.cond(
             do_adapt,
-            lambda _: _welford_update_accumulator(
-                welford_method,
-                count,
-                mean_draw,
-                var_draw,
-                new_position,
-                n_init=welford_n_init,
+            lambda _: self._update_welford_accumulators(
+                count, mean_draw, var_draw, new_position
             ),
             lambda _: (count, mean_draw, var_draw),
             operand=None,
         )
         _, mean_grad_n, var_grad_n = jax.lax.cond(
             do_adapt,
-            lambda _: _welford_update_accumulator(
-                welford_method,
-                count,
-                mean_grad,
-                var_grad,
-                grad_chain,
-                n_init=welford_n_init,
+            lambda _: self._update_welford_accumulators(
+                count, mean_grad, var_grad, grad_chain
             ),
             lambda _: (count, mean_grad, var_grad),
             operand=None,
@@ -924,13 +1016,8 @@ class ParallelMALA(ParallelHMC):
         if mode == "draw-only":
             _, mean_n, var_n = jax.lax.cond(
                 do_adapt,
-                lambda _: _welford_update_accumulator(
-                    welford_method,
-                    count,
-                    mean_draw,
-                    var_draw,
-                    new_position,
-                    n_init=welford_n_init,
+                lambda _: self._update_welford_accumulators(
+                    count, mean_draw, var_draw, new_position
                 ),
                 lambda _: (count, mean_draw, var_draw),
                 operand=None,
@@ -939,26 +1026,16 @@ class ParallelMALA(ParallelHMC):
 
         _, mean_draw_n, var_draw_n = jax.lax.cond(
             do_adapt,
-            lambda _: _welford_update_accumulator(
-                welford_method,
-                count,
-                mean_draw,
-                var_draw,
-                new_position,
-                n_init=welford_n_init,
+            lambda _: self._update_welford_accumulators(
+                count, mean_draw, var_draw, new_position
             ),
             lambda _: (count, mean_draw, var_draw),
             operand=None,
         )
         _, mean_grad_n, var_grad_n = jax.lax.cond(
             do_adapt,
-            lambda _: _welford_update_accumulator(
-                welford_method,
-                count,
-                mean_grad,
-                var_grad,
-                grad_new,
-                n_init=welford_n_init,
+            lambda _: self._update_welford_accumulators(
+                count, mean_grad, var_grad, grad_new
             ),
             lambda _: (count, mean_grad, var_grad),
             operand=None,
