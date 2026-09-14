@@ -14,10 +14,9 @@ The fixed-point update can be:
   * ``picard`` — ``x^{(i+1)}_t = x^{(i+1)}_{t-1} + f_t(x^{(i)}_{t-1}) - x^{(i)}_{t-1}``
     (equivalently ``A_t = I``, solved via ``cumsum``)
 
-The HMC transition and EM loop live entirely in this script; only ``src.deer``
-is used from the core library for Newton / quasi-Newton (no changes to
-``samplers.py``). Jacobi and Picard are implemented here, matching the
-updates in ``sequence-parallel-mcmc-jasa/samplers.py``.
+The EM loop and Jacobi / Picard updates live in this script. HMC transitions
+use BlackJAX (``blackjax.mcmc.hmc``); Newton / quasi-Newton use ``src.deer``.
+Jacobi and Picard match ``sequence-parallel-mcmc-jasa/samplers.py``.
 
 Run:
     python examples/run_em_mass_deer.py
@@ -44,8 +43,11 @@ if str(_REPO_ROOT) not in sys.path:
 if str(_EXAMPLES_DIR) not in sys.path:
     sys.path.insert(0, str(_EXAMPLES_DIR))
 
+from config import add_run_output_args, resolve_run_dir
 from src import deer
 from targets import load_target
+
+_RUNS_PARENT = _REPO_ROOT / "experiments" / "em_mass_runs"
 
 jax.config.update("jax_enable_x64", True)
 jax.config.update("jax_default_matmul_precision", "highest")
@@ -65,58 +67,71 @@ def _sigmoid_accept(x):
     return soft - jax.lax.stop_gradient(soft) + jax.lax.stop_gradient((x > 0).astype(x.dtype))
 
 
-def _leapfrog_diag_mass(position, momentum, step_size, mass_diag, log_prob_and_grad):
-    """One leapfrog step with diagonal mass: dq = (p / M) dt."""
-    position = position + step_size * (momentum / mass_diag)
-    _, grad = log_prob_and_grad(position)
-    momentum = momentum + step_size * grad
-    return position, momentum
+def _sigmoid_sample_proposal(rng_key, log_p_accept, proposal, new_proposal):
+    """BlackJAX ``sample_proposal`` with DEER-friendly soft MH accept."""
+    u = jr.uniform(rng_key, [])
+    g = _sigmoid_accept(log_p_accept - jnp.log(u))
+    blended = jax.tree_util.tree_map(
+        lambda a, b: g * b + (1.0 - g) * a, proposal, new_proposal
+    )
+    p_accept = jnp.clip(jnp.exp(log_p_accept), a_max=1)
+    return blended, (g, p_accept, None)
+
+
+def _hard_sample_proposal(rng_key, log_p_accept, proposal, new_proposal):
+    """BlackJAX ``sample_proposal`` with hard MH accept (JAX 0.4-compatible)."""
+    p_accept = jnp.clip(jnp.exp(log_p_accept), a_max=1)
+    do_accept = jr.bernoulli(rng_key, p_accept)
+    sampled = jax.lax.cond(
+        do_accept, lambda _: new_proposal, lambda _: proposal, operand=None
+    )
+    return sampled, (do_accept, p_accept, None)
 
 
 def make_hmc_fn(log_prob, *, sigmoid_accept: bool = True):
-    """Build ``func(state, driver, params) -> next_state`` for DEER.
+    """Build ``func(state, driver, params) -> next_state`` via BlackJAX HMC.
 
-    ``params`` must contain ``epsilon``, ``num_leapfrog_steps``, and ``mass_diag``.
+    ``params`` must contain ``epsilon``, ``num_leapfrog_steps``, and ``mass_diag``
+    (diagonal mass ``M``; BlackJAX is passed ``M^{-1}``). Same kernel path as
+    ``blackjax.mcmc.hmc.build_kernel``, with optional soft MH accept for DEER.
     """
-    log_prob_and_grad = jax.value_and_grad(log_prob)
+    import blackjax.mcmc.hmc as blackjax_hmc
+    from blackjax.mcmc import integrators, metrics
+
+    sample_proposal = (
+        _sigmoid_sample_proposal if sigmoid_accept else _hard_sample_proposal
+    )
 
     def hmc_fn(position, driver, params):
         seed, _t = driver
         step_size = params["epsilon"]
         num_steps = params["num_leapfrog_steps"]
-        mass_diag = params["mass_diag"]
+        inverse_mass_matrix = 1.0 / params["mass_diag"]
 
-        momentum_seed, mh_seed = jr.split(seed)
-        tlp, tlp_grad = log_prob_and_grad(position)
-        momentum = jnp.sqrt(mass_diag) * jr.normal(momentum_seed, position.shape)
-        energy = 0.5 * jnp.sum((momentum**2) / mass_diag) - tlp
-
-        momentum = momentum + 0.5 * step_size * tlp_grad
-
-        def body(_, carry):
-            return _leapfrog_diag_mass(*carry, step_size, mass_diag, log_prob_and_grad)
-
-        position_new, momentum = jax.lax.fori_loop(
-            0, num_steps, body, (position, momentum)
+        state = blackjax_hmc.init(position, log_prob)
+        metric = metrics.default_metric(inverse_mass_matrix)
+        symplectic_integrator = integrators.velocity_verlet(
+            log_prob, metric.kinetic_energy
         )
-        new_tlp, new_tlp_grad = log_prob_and_grad(position_new)
-        momentum = momentum - 0.5 * step_size * new_tlp_grad
+        proposal_generator = blackjax_hmc.hmc_proposal(
+            symplectic_integrator,
+            metric.kinetic_energy,
+            step_size,
+            num_steps,
+            sample_proposal=sample_proposal,
+        )
 
-        new_energy = 0.5 * jnp.sum((momentum**2) / mass_diag) - new_tlp
-        log_accept_ratio = energy - new_energy
-        u = jr.uniform(mh_seed, [])
-        if sigmoid_accept:
-            g = _sigmoid_accept(log_accept_ratio - jnp.log(u))
-        else:
-            g = (log_accept_ratio > jnp.log(u)).astype(position.dtype)
-        return g * position_new + (1.0 - g) * position
+        key_momentum, key_integrator = jr.split(seed)
+        momentum = metric.sample_momentum(key_momentum, position)
+        integrator_state = integrators.IntegratorState(
+            state.position, momentum, state.logdensity, state.logdensity_grad
+        )
+        proposal, _, _ = proposal_generator(key_integrator, integrator_state)
+        return proposal.position
 
     return hmc_fn
 
 
-# --------------------------------------------------------------------------- #
-#                              Mass from trajectory                            #
-# --------------------------------------------------------------------------- #
 def mass_from_trajectory(
     positions: jnp.ndarray,
     *,
@@ -265,12 +280,8 @@ def run_em(
             yt, res = step_fn(guess, mass_diag)
             return yt, float(np.asarray(res))
 
-    else:
-        raise ValueError(
-            f"Unknown solver '{solver}'; expected one of full, quasi, jacobi, picard."
-        )
 
-    for k in range(em_iters):
+    for _ in range(em_iters):
         yt, res = take_step(guess, mass_diag)
         yt_np = np.asarray(yt)
         trajectories.append(yt_np)
@@ -279,13 +290,6 @@ def run_em(
         mass_diag = mass_from_trajectory(yt)
         masses.append(np.asarray(mass_diag))
         guess = yt  # warm-start next solver step from this trajectory
-
-        print(
-            f"  EM {k + 1:3d}/{em_iters}: "
-            f"residual={res:.3e}  "
-            f"mass median={float(np.median(masses[-1])):.3e}  "
-            f"mass range=[{float(np.min(masses[-1])):.3e}, {float(np.max(masses[-1])):.3e}]"
-        )
 
     return trajectories, masses, residuals
 
@@ -306,7 +310,7 @@ def main():
     parser.add_argument("--target", default="gaussian_10d", help="target name from registry")
     parser.add_argument("--T", type=int, default=500, help="chain length")
     parser.add_argument("--em-iters", type=int, default=30, help="outer EM iterations")
-    parser.add_argument("--epsilon", type=float, default=0.05, help="HMC step size")
+    parser.add_argument("--epsilon", type=float, default=0.1, help="HMC step size")
     parser.add_argument("--num-leapfrog-steps", type=int, default=8)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--initial-state-scale", type=float, default=2.0)
@@ -338,9 +342,12 @@ def main():
         help="skip sequential HMC comparison at the final mass",
     )
     parser.add_argument("--no-plot", action="store_true")
+    add_run_output_args(parser, runs_parent=_RUNS_PARENT)
     args = parser.parse_args()
 
     solver: SolverType = "quasi" if args.quasi else args.solver
+    run_dir = resolve_run_dir(args)
+    run_dir.mkdir(parents=True, exist_ok=True)
 
     target = load_target(args.target)
     D = target.dim
@@ -352,14 +359,13 @@ def main():
     drivers = (jr.split(key, (args.T,)), jnp.arange(args.T))
     init_guess = jnp.broadcast_to(y0[None, :], (args.T, D))
 
-    # Start with identity mass (unit kinetic metric).
     mass0 = jnp.ones((D,))
     params = {
         "epsilon": args.epsilon,
         "num_leapfrog_steps": args.num_leapfrog_steps,
         "mass_diag": mass0,
     }
-    # DEER-only kwargs (ignored by Jacobi / Picard).
+
     deer_kwargs = dict(
         damp_factor=args.damp_factor,
         tol=args.tol,
@@ -369,21 +375,6 @@ def main():
     )
 
     hmc_fn = make_hmc_fn(log_prob, sigmoid_accept=args.sigmoid_accept)
-
-    solver_label = {
-        "full": "DEER (full Newton)",
-        "quasi": "DEER (quasi-Newton)",
-        "jacobi": "Jacobi (A=0)",
-        "picard": "Picard (A=I)",
-    }[solver]
-
-    print("=" * 72)
-    print(f"EM mass adaptation × {solver_label} (one step per outer iter)")
-    print(
-        f"  target={target.name}  D={D}  T={args.T}  em_iters={args.em_iters}  "
-        f"solver={solver}"
-    )
-    print("=" * 72)
 
     trajectories, masses, residuals = run_em(
         hmc_fn,
@@ -398,8 +389,6 @@ def main():
 
     final_mass = masses[-1]
     final_traj = trajectories[-1]
-    print(f"\nFinal mass (after last update): median={float(np.median(final_mass)):.4e}")
-    print(f"Final trajectory position std (empirical): {np.std(final_traj, axis=0)[: min(5, D)]}")
 
     if not args.no_sequential:
         seq_params = {**params, "mass_diag": jnp.asarray(final_mass)}
@@ -410,17 +399,27 @@ def main():
         seq = None
 
     if not args.no_plot:
-        make_plots(trajectories, masses, residuals, seq, args, target.name, solver)
+        make_plots(
+            trajectories, masses, residuals, seq, args, target.name, solver, run_dir
+        )
+
+    latest_parent = (
+        args.latest_run_parent.resolve()
+        if args.latest_run_parent is not None
+        else run_dir.parent
+    )
+    latest_parent.mkdir(parents=True, exist_ok=True)
+    (latest_parent / "latest_run.txt").write_text(str(run_dir.resolve()) + "\n")
+    print(f"\nRun directory: {run_dir}")
 
 
-def make_plots(trajectories, masses, residuals, seq, args, target_name, solver):
+def make_plots(trajectories, masses, residuals, seq, args, target_name, solver, run_dir):
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    out_dir = _REPO_ROOT / "experiments" / "em_mass_runs"
-    out_dir.mkdir(parents=True, exist_ok=True)
+    run_dir.mkdir(parents=True, exist_ok=True)
 
     mass_arr = np.stack(masses, axis=0)  # (em_iters+1, D)
     fig, axes = plt.subplots(1, 3, figsize=(15, 4.2))
@@ -460,13 +459,16 @@ def make_plots(trajectories, masses, residuals, seq, args, target_name, solver):
         f"EM–{solver} mass adaptation — {target_name} (T={args.T})", y=1.02
     )
     fig.tight_layout()
-    path = out_dir / f"em_mass_{target_name}_{solver}_T{args.T}_K{args.em_iters}.png"
+    path = run_dir / "em_mass.png"
     fig.savefig(path, dpi=130, bbox_inches="tight")
     print(f"\nSaved figure to {path}")
 
-    np.save(out_dir / f"em_masses_{target_name}_{solver}.npy", mass_arr)
-    np.save(out_dir / f"em_residuals_{target_name}_{solver}.npy", np.asarray(residuals))
-    np.save(out_dir / f"em_final_traj_{target_name}_{solver}.npy", final)
+    np.save(run_dir / "em_masses.npy", mass_arr)
+    np.save(run_dir / "em_residuals.npy", np.asarray(residuals))
+    traj_hist = np.stack(trajectories, axis=0)  # (em_iters, T, D)
+    np.save(run_dir / "em_trajectories.npy", traj_hist)
+    np.save(run_dir / "em_final_traj.npy", final)
+    print(f"Saved arrays under {run_dir} (trajectories shape {traj_hist.shape})")
 
 
 if __name__ == "__main__":
