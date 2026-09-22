@@ -269,18 +269,6 @@ def run_em(
             yt, res = step_fn(guess, mass_diag)
             return yt, float(np.asarray(res))
 
-    elif solver == "picard":
-        step_fn = jax.jit(
-            lambda guess, mass: picard_step(
-                hmc_fn, y0, drivers, {**params, "mass_diag": mass}, guess
-            )
-        )
-
-        def take_step(guess, mass_diag):
-            yt, res = step_fn(guess, mass_diag)
-            return yt, float(np.asarray(res))
-
-
     for _ in range(em_iters):
         yt, res = take_step(guess, mass_diag)
         yt_np = np.asarray(yt)
@@ -314,38 +302,16 @@ def main():
     parser.add_argument("--num-leapfrog-steps", type=int, default=8)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--initial-state-scale", type=float, default=2.0)
-    parser.add_argument(
-        "--solver",
-        choices=["full", "quasi", "jacobi", "picard"],
-        default="full",
-        help=(
-            "fixed-point update: full/quasi DEER Newton, or Jacobi (A=0) / Picard (A=I)"
-        ),
-    )
-    parser.add_argument(
-        "--quasi",
-        action="store_true",
-        help="alias for --solver quasi (kept for backward compatibility)",
-    )
+    parser.add_argument("--solver", choices=["full", "quasi", "jacobi", "picard"], default="quasi")
     parser.add_argument("--damp-factor", type=float, default=1.0)
     parser.add_argument("--tol", type=float, default=1e-5)
     parser.add_argument("--rtol", type=float, default=1e-5)
     parser.add_argument("--clip-val", type=float, default=1e8)
-    parser.add_argument(
-        "--sigmoid-accept",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-    )
-    parser.add_argument(
-        "--no-sequential",
-        action="store_true",
-        help="skip sequential HMC comparison at the final mass",
-    )
-    parser.add_argument("--no-plot", action="store_true")
+    parser.add_argument("--sigmoid-accept", action=argparse.BooleanOptionalAction, default=True)
     add_run_output_args(parser, runs_parent=_RUNS_PARENT)
     args = parser.parse_args()
 
-    solver: SolverType = "quasi" if args.quasi else args.solver
+    solver: SolverType = args.solver
     run_dir = resolve_run_dir(args)
     run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -390,18 +356,12 @@ def main():
     final_mass = masses[-1]
     final_traj = trajectories[-1]
 
-    if not args.no_sequential:
-        seq_params = {**params, "mass_diag": jnp.asarray(final_mass)}
-        seq = np.asarray(sequential_hmc(hmc_fn, y0, drivers, seq_params))
-        err = float(np.max(np.abs(final_traj - seq)))
-        print(f"max |EM-final traj - sequential @ final M|: {err:.3e}")
-    else:
-        seq = None
+    seq_params = {**params, "mass_diag": jnp.asarray(final_mass)}
+    seq = np.asarray(sequential_hmc(hmc_fn, y0, drivers, seq_params))
+    err = float(np.max(np.abs(final_traj - seq)))
+    print(f"max |EM-final traj - sequential @ final M|: {err:.3e}")
 
-    if not args.no_plot:
-        make_plots(
-            trajectories, masses, residuals, seq, args, target.name, solver, run_dir
-        )
+    make_plots(trajectories, masses, residuals, seq, args, target.name, solver, run_dir)
 
     latest_parent = (
         args.latest_run_parent.resolve()

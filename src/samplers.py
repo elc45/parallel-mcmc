@@ -837,7 +837,17 @@ class ParallelMALA(ParallelHMC):
     i.e. ``y ~ N(x + (eps^2 / 2) A grad_logp(x), eps^2 A)``, accepted with the standard MALA
     Metropolis-Hastings ratio. ``num_leapfrog_steps`` is ignored (MALA is a single step).
     MH accept uses the inherited ``sigmoid_accept`` flag (see :class:`ParallelHMC`).
+
+    Set ``unadjusted=True`` to skip the Metropolis correction (ULA) while using the same
+    Langevin proposal and the same proposal RNG split, so adjusted/unadjusted chains can
+    share noise and initialization.
     """
+
+    unadjusted: bool
+
+    def __init__(self, *args, unadjusted: bool = False, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.unadjusted = bool(unadjusted)
 
     def _mala_propose_accept(self, position, mass_diag, seed, step_size):
         """One MALA proposal + Metropolis step at fixed diagonal ``mass_diag`` (= M).
@@ -845,6 +855,8 @@ class ParallelMALA(ParallelHMC):
         Returns ``(new_position, grad_at_new, accepted)`` where the gradient is the accept/reject blend of
         the score at the proposal and at the current point (used by the ``grad`` Welford
         accumulator, mirroring :meth:`ParallelHMC._hmc_adaptive_mass`).
+        When ``unadjusted`` is True the proposal is always taken (ULA); the MH uniform is
+        still drawn so the per-step RNG split matches the adjusted chain.
         """
         precond = 1.0 / mass_diag
         prop_seed, mh_seed = jr.split(seed)
@@ -855,6 +867,11 @@ class ParallelMALA(ParallelHMC):
         proposal = drift_x + noise
 
         tlp_y, grad_y = self.target_log_prob_and_grad(proposal)
+        if self.unadjusted:
+            _ = jr.uniform(mh_seed, [])
+            ones = jnp.ones((), dtype=position.dtype)
+            return proposal, grad_y, ones
+
         drift_y = proposal + 0.5 * step_size**2 * precond * grad_y
 
         inv_cov = mass_diag / (step_size**2)
